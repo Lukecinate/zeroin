@@ -6,8 +6,18 @@ use crate::theme::*;
 use crate::widgets::{self, Icon, Tone};
 use eframe::egui::{self, Align2, Pos2, Rect, Sense, Stroke, StrokeKind, Vec2};
 
-/// Civil date from a Unix timestamp (UTC), without extra dependencies.
+/// Date and time in the PC's local time zone (UTC where it cannot be read).
 pub fn format_date(unix: u64) -> String {
+    format_date_with(unix, crate::platform::local_offset_secs(unix))
+}
+
+/// Civil date from a Unix timestamp shifted by `offset` seconds; without an
+/// offset the time is shown as UTC and labelled so.
+pub fn format_date_with(unix: u64, offset: Option<i64>) -> String {
+    let (unix, suffix) = match offset {
+        Some(o) => ((unix as i64 + o).max(0) as u64, ""),
+        None => (unix, " UTC"),
+    };
     let days = (unix / 86_400) as i64;
     let z = days + 719_468;
     let era = z.div_euclid(146_097);
@@ -21,7 +31,7 @@ pub fn format_date(unix: u64) -> String {
     let y = if m <= 2 { y + 1 } else { y };
     const MONTHS: [&str; 12] = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
     let secs = unix % 86_400;
-    format!("{d} {} {y}, {:02}:{:02} UTC", MONTHS[(m - 1) as usize], secs / 3600, (secs % 3600) / 60)
+    format!("{d} {} {y}, {:02}:{:02}{suffix}", MONTHS[(m - 1) as usize], secs / 3600, (secs % 3600) / 60)
 }
 
 impl ZeroInApp {
@@ -148,7 +158,12 @@ impl ZeroInApp {
 mod tests {
     #[test]
     fn dates() {
-        assert_eq!(super::format_date(0), "1 Jan 1970, 00:00 UTC");
-        assert_eq!(super::format_date(1_794_268_800), "10 Nov 2026, 00:00 UTC");
+        use super::format_date_with as f;
+        assert_eq!(f(0, None), "1 Jan 1970, 00:00 UTC");
+        assert_eq!(f(1_794_268_800, None), "10 Nov 2026, 00:00 UTC");
+        // 11:36 UTC is 18:36 in Jakarta (UTC+7); offsets can cross midnight.
+        assert_eq!(f(1_794_268_800 + 11 * 3600 + 36 * 60, Some(7 * 3600)), "10 Nov 2026, 18:36");
+        assert_eq!(f(1_794_268_800 + 20 * 3600, Some(7 * 3600)), "11 Nov 2026, 03:00");
+        assert_eq!(f(1_794_268_800 + 3600, Some(-5 * 3600)), "9 Nov 2026, 20:00");
     }
 }
