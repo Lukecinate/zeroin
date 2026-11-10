@@ -1,0 +1,41 @@
+[package]
+name = "zeroin-app"
+description = "ZeroIn: find your mouse sensitivity with aim drills and a local, optional AI advisor (Windows 10/11)."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+publish = false
+
+[[bin]]
+name = "zeroin"
+path = "src/main.rs"
+
+[features]
+default = []
+# Local language model via llama.cpp (CPU). Off by default so the app builds
+# without a C/C++ toolchain; release builds enable it.
+llm = ["dep:llama-cpp-2"]
+
+[dependencies]
+zeroin-core = { path = "../zeroin-core" }
+eframe = { version = "0.37", default-features = false, features = ["wgpu", "accesskit", "default_fonts", "x11", "wayland"] }
+egui_extras = { version = "0.37", default-features = false, features = ["svg"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+libloading = "0.8"
+# No OpenMP: avoids a runtime dependency on vcomp140.dll; ggml uses its own thread pool.
+llama-cpp-2 = { version = "0.1.161", optional = true, default-features = false }
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_System_LibraryLoader",
+    "Win32_UI_Input",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
+[target.'cfg(windows)'.build-dependencies]
+winresource = "0.1"
