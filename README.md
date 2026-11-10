@@ -10,6 +10,18 @@ ZeroIn asks which game you play and how your mouse is set up, then runs blind ro
 
 ZeroIn is an independent project. Its approach (testing candidate sensitivities and narrowing the range) is a general, publicly known calibration method; all code and assets here are original and MIT licensed.
 
+## Screenshots
+
+| Setup | Test |
+|---|---|
+| ![Setup: a step asks whether Enhance pointer precision is on and compares the answer with what Windows reports](docs/screenshots/setup.png) | ![Test: a blind flick drill with the round and candidate shown at the top](docs/screenshots/test.png) |
+| **Result** | **History** |
+| ![Result: the recommended sensitivity with cm/360, eDPI, confidence, a summary and the Apply to Windows button](docs/screenshots/result.png) | ![History: past results stored on this PC only](docs/screenshots/history.png) |
+| **Settings** | |
+| ![Settings: test length, rounds, local AI, devices and Windows mouse settings](docs/screenshots/settings.png) | |
+
+Captured from version 0.1.1 during a scripted demo run, so the scores and the summary text reflect synthetic input rather than a real player.
+
 ## Features
 
 - **Guided setup in plain steps.** Game, DPI, current sensitivity, Windows "Enhance pointer precision", Windows pointer speed. ZeroIn reads the last two from Windows, shows when your answer differs, and explains why acceleration on or a pointer speed other than 10 matters (and when it does not).
