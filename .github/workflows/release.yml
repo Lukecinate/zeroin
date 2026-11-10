@@ -1,0 +1,103 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  # Pinned model: Qwen3-1.7B, Q4_K_M GGUF (Apache-2.0), quantised by Unsloth.
+  MODEL_URL: https://huggingface.co/unsloth/Qwen3-1.7B-GGUF/resolve/d7f544eead698dbd1f15126ef60b45a1e1933222/Qwen3-1.7B-Q4_K_M.gguf
+  MODEL_FILE: Qwen3-1.7B-Q4_K_M.gguf
+  MODEL_SHA256: b139949c5bd74937ad8ed8c8cf3d9ffb1e99c866c823204dc42c0d91fa181897
+  # llama.cpp: static CRT to match the Rust binary; AVX2/FMA/F16C for usable CPU speed
+  # (the app checks the CPU at runtime before loading the model).
+  LLAMA_STATIC_CRT: "1"
+  GGML_AVX: "ON"
+  GGML_AVX2: "ON"
+  GGML_FMA: "ON"
+  GGML_F16C: "ON"
+
+jobs:
+  build:
+    name: Build Windows installer
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Version from tag
+        id: ver
+        shell: pwsh
+        run: |
+          $v = (Select-String -Path Cargo.toml -Pattern '^version = "(.+)"').Matches[0].Groups[1].Value
+          if ($env:GITHUB_REF_TYPE -eq 'tag' -and $env:GITHUB_REF_NAME -ne "v$v") { throw "Tag $env:GITHUB_REF_NAME does not match Cargo version $v" }
+          "version=$v" >> $env:GITHUB_OUTPUT
+
+      - name: Test
+        run: cargo test --workspace --locked
+
+      - name: Build app with local AI
+        run: cargo build --release -p zeroin-app --features llm --locked
+
+      - name: Fetch and verify model
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist/models | Out-Null
+          Invoke-WebRequest -Uri $env:MODEL_URL -OutFile "dist/models/$env:MODEL_FILE"
+          $h = (Get-FileHash "dist/models/$env:MODEL_FILE" -Algorithm SHA256).Hash.ToLower()
+          if ($h -ne $env:MODEL_SHA256) { throw "Model checksum mismatch: $h" }
+
+      - name: Stage files
+        shell: pwsh
+        run: |
+          Copy-Item target/release/zeroin.exe dist/
+          Get-ChildItem target/release -Filter *.dll -ErrorAction SilentlyContinue | Copy-Item -Destination dist/
+          Copy-Item LICENSE, README.md, CHANGELOG.md, THIRD_PARTY_NOTICES.md dist/
+          New-Item -ItemType Directory -Force dist/licenses | Out-Null
+          Copy-Item licenses/* dist/licenses/
+
+      - name: Portable zip (app only, no model)
+        shell: pwsh
+        run: |
+          $v = "${{ steps.ver.outputs.version }}"
+          New-Item -ItemType Directory -Force out | Out-Null
+          $stage = "out/ZeroIn-$v-portable"
+          New-Item -ItemType Directory -Force $stage | Out-Null
+          Get-ChildItem dist -Exclude models | Copy-Item -Destination $stage -Recurse
+          Compress-Archive -Path "$stage/*" -DestinationPath "out/ZeroIn-$v-x64-portable.zip"
+          Remove-Item -Recurse $stage
+
+      - name: Installer (Inno Setup)
+        shell: pwsh
+        run: |
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) { choco install innosetup -y --no-progress; }
+          & $iscc /DAppVersion=${{ steps.ver.outputs.version }} /DModelFile=$env:MODEL_FILE installer/zeroin.iss
+          if ($LASTEXITCODE -ne 0) { throw "ISCC failed" }
+
+      - name: Checksums
+        shell: pwsh
+        run: |
+          Get-ChildItem out -File | ForEach-Object { "{0}  {1}" -f (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower(), $_.Name } | Out-File -Encoding ascii out/SHA256SUMS.txt
+          Get-Content out/SHA256SUMS.txt
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: zeroin-windows
+          path: out/*
+          if-no-files-found: error
+          compression-level: 0
+
+      - name: Publish release
+        if: github.ref_type == 'tag'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: out/*
+          body_path: docs/release-notes/v${{ steps.ver.outputs.version }}.md
+          fail_on_unmatched_files: true

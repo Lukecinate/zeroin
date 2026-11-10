@@ -1,0 +1,52 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  core:
+    name: Core tests (Linux)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all -- --check
+      - run: cargo test -p zeroin-core --locked
+      - run: cargo clippy -p zeroin-core --locked -- -D warnings
+
+  windows:
+    name: App build and tests (Windows, no AI)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --workspace --locked
+      - run: cargo clippy -p zeroin-app --locked -- -D warnings
+      - run: cargo build --release -p zeroin-app --locked
+
+  windows-llm:
+    name: App build with local AI (Windows)
+    runs-on: windows-latest
+    env:
+      LLAMA_STATIC_CRT: "1"
+      GGML_AVX: "ON"
+      GGML_AVX2: "ON"
+      GGML_FMA: "ON"
+      GGML_F16C: "ON"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release -p zeroin-app --features llm --locked
