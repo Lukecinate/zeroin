@@ -90,7 +90,9 @@ jobs:
       - name: Checksums
         shell: pwsh
         run: |
-          Get-ChildItem out -File | ForEach-Object { "{0}  {1}" -f (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower(), $_.Name } | Out-File -Encoding ascii out/SHA256SUMS.txt
+          $files = @(Get-ChildItem out -File)
+          $lines = $files | ForEach-Object { "{0}  {1}" -f (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower(), $_.Name }
+          $lines | Out-File -Encoding ascii out/SHA256SUMS.txt
           Get-Content out/SHA256SUMS.txt
 
       - uses: actions/upload-artifact@v4
