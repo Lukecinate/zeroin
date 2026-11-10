@@ -40,7 +40,6 @@ jobs:
     name: App build with local AI (Windows)
     runs-on: windows-latest
     env:
-      LLAMA_STATIC_CRT: "1"
       GGML_AVX: "ON"
       GGML_AVX2: "ON"
       GGML_FMA: "ON"

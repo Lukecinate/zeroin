@@ -34,3 +34,7 @@ The full dependency tree and its licences can be listed with `cargo tree` and
 | Component | Use | Licence |
 |---|---|---|
 | Wooting Analog SDK (`wooting_analog_wrapper.dll`) | Analog key depth, loaded only if the user installed it | MPL-2.0 |
+
+## Microsoft Visual C++ runtime
+
+Windows builds ship the Visual C++ runtime DLLs (`vcruntime140*.dll`, `msvcp140*.dll`) next to `zeroin.exe`. They are redistributable files from the Microsoft Visual Studio redistributable package, included under the Visual Studio license terms for application-local deployment. They are not covered by the MIT license.

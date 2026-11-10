@@ -1,4 +1,0 @@
-# Link the C runtime statically on Windows so the app does not depend on the
-# Visual C++ redistributable. llama.cpp is built to match (LLAMA_STATIC_CRT=1 in CI).
-[target.x86_64-pc-windows-msvc]
-rustflags = ["-C", "target-feature=+crt-static"]

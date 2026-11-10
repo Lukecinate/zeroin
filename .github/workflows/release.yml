@@ -14,9 +14,8 @@ env:
   MODEL_URL: https://huggingface.co/unsloth/Qwen3-1.7B-GGUF/resolve/d7f544eead698dbd1f15126ef60b45a1e1933222/Qwen3-1.7B-Q4_K_M.gguf
   MODEL_FILE: Qwen3-1.7B-Q4_K_M.gguf
   MODEL_SHA256: b139949c5bd74937ad8ed8c8cf3d9ffb1e99c866c823204dc42c0d91fa181897
-  # llama.cpp: static CRT to match the Rust binary; AVX2/FMA/F16C for usable CPU speed
+  # llama.cpp: AVX2/FMA/F16C for usable CPU speed
   # (the app checks the CPU at runtime before loading the model).
-  LLAMA_STATIC_CRT: "1"
   GGML_AVX: "ON"
   GGML_AVX2: "ON"
   GGML_FMA: "ON"
@@ -58,6 +57,13 @@ jobs:
         run: |
           Copy-Item target/release/zeroin.exe dist/
           Get-ChildItem target/release -Filter *.dll -ErrorAction SilentlyContinue | Copy-Item -Destination dist/
+          # App-local Visual C++ runtime (Microsoft redistributable files), so no separate VC++ install is needed.
+          $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -property installationPath
+          $crt = Get-ChildItem "$vs\VC\Redist\MSVC\*\x64\Microsoft.VC*.CRT" -Directory | Sort-Object FullName | Select-Object -Last 1
+          if (-not $crt) { throw "VC++ redistributable folder not found" }
+          Write-Host "CRT from $($crt.FullName)"
+          Copy-Item "$($crt.FullName)\*.dll" dist/
+          Get-ChildItem dist -Filter *.dll | ForEach-Object { $_.Name }
           Copy-Item LICENSE, README.md, CHANGELOG.md, THIRD_PARTY_NOTICES.md dist/
           New-Item -ItemType Directory -Force dist/licenses | Out-Null
           Copy-Item licenses/* dist/licenses/

@@ -50,7 +50,7 @@ ZeroIn is fully local. It has no accounts, no telemetry, no analytics and makes 
 cargo build --release -p zeroin-app
 
 # App with the AI (needs CMake, Clang/LLVM and the MSVC build tools)
-$env:LLAMA_STATIC_CRT = "1"; $env:GGML_AVX2 = "ON"; $env:GGML_FMA = "ON"; $env:GGML_F16C = "ON"
+$env:GGML_AVX2 = "ON"; $env:GGML_FMA = "ON"; $env:GGML_F16C = "ON"
 cargo build --release -p zeroin-app --features llm
 ```
 
