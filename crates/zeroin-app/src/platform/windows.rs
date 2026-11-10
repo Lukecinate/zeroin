@@ -177,3 +177,100 @@ pub fn display_info() -> Option<DisplayInfo> {
 pub fn open_folder(path: &std::path::Path) {
     let _ = std::process::Command::new("explorer").arg(path).spawn();
 }
+
+// ---------------------------------------------------------------------------
+// Pointer settings (write path)
+
+/// Read the raw values behind the pointer settings.
+pub fn mouse_params() -> Option<zeroin_core::winmouse::MouseParams> {
+    let mut speed: i32 = 0;
+    let mut accel: [i32; 3] = [0; 3];
+    // SAFETY: both buffers are the sizes these SPI actions document.
+    unsafe {
+        SystemParametersInfoW(SPI_GETMOUSESPEED, 0, Some(&mut speed as *mut i32 as *mut _), SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0)).ok()?;
+        SystemParametersInfoW(SPI_GETMOUSE, 0, Some(accel.as_mut_ptr() as *mut _), SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0)).ok()?;
+    }
+    Some(zeroin_core::winmouse::MouseParams {
+        threshold1: accel[0],
+        threshold2: accel[1],
+        acceleration: accel[2],
+        speed: speed.clamp(1, 20) as u32,
+    })
+}
+
+/// Write pointer speed and acceleration for the current user (no admin
+/// rights needed), persist them, and notify other apps.
+pub fn set_mouse_params(p: zeroin_core::winmouse::MouseParams) -> Result<(), String> {
+    use windows::Win32::UI::WindowsAndMessaging::{SPIF_SENDCHANGE, SPIF_UPDATEINIFILE, SPI_SETMOUSE, SPI_SETMOUSESPEED};
+    let p = p.sanitized();
+    let mut accel: [i32; 3] = [p.threshold1, p.threshold2, p.acceleration];
+    let flags = SPIF_UPDATEINIFILE | SPIF_SENDCHANGE;
+    // SAFETY: SPI_SETMOUSE takes a pointer to three INTs; SPI_SETMOUSESPEED
+    // takes the speed itself in pvParam (documented, not a pointer).
+    unsafe {
+        SystemParametersInfoW(SPI_SETMOUSE, 0, Some(accel.as_mut_ptr() as *mut _), flags).map_err(|e| format!("Acceleration: {e}"))?;
+        SystemParametersInfoW(SPI_SETMOUSESPEED, 0, Some(p.speed as usize as *mut _), flags).map_err(|e| format!("Pointer speed: {e}"))?;
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Cursor confinement during drills
+
+/// Confine the cursor to the window's client area and park it in the middle,
+/// so clicks cannot land on another window or monitor. Raw Input is
+/// unaffected: `SetCursorPos` produces no raw mouse motion.
+pub fn confine_cursor(hwnd: isize) {
+    use windows::Win32::Foundation::{POINT, RECT};
+    use windows::Win32::Graphics::Gdi::ClientToScreen;
+    use windows::Win32::UI::WindowsAndMessaging::{ClipCursor, GetClientRect, SetCursorPos};
+    let hwnd = HWND(hwnd as *mut _);
+    let mut rc = RECT::default();
+    // SAFETY: plain Win32 calls on our own window handle with valid out-pointers.
+    unsafe {
+        if GetClientRect(hwnd, &mut rc).is_err() {
+            return;
+        }
+        let mut tl = POINT { x: rc.left, y: rc.top };
+        let mut br = POINT { x: rc.right, y: rc.bottom };
+        if !ClientToScreen(hwnd, &mut tl).as_bool() || !ClientToScreen(hwnd, &mut br).as_bool() {
+            return;
+        }
+        let screen = RECT { left: tl.x, top: tl.y, right: br.x, bottom: br.y };
+        let _ = ClipCursor(Some(&screen));
+        let _ = SetCursorPos((tl.x + br.x) / 2, (tl.y + br.y) / 2);
+    }
+}
+
+/// Release any cursor confinement. Safe to call at any time, including from
+/// a panic hook.
+pub fn release_cursor() {
+    use windows::Win32::UI::WindowsAndMessaging::ClipCursor;
+    // SAFETY: a null rectangle removes the clip; no other state is touched.
+    unsafe {
+        let _ = ClipCursor(None);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Local time
+
+/// Offset of local time from UTC, in seconds, at the given Unix time
+/// (daylight saving time applied for that date).
+pub fn local_offset_secs(unix: u64) -> Option<i64> {
+    use windows::Win32::Foundation::{FILETIME, SYSTEMTIME};
+    use windows::Win32::System::Time::{FileTimeToSystemTime, SystemTimeToFileTime, SystemTimeToTzSpecificLocalTimeEx};
+    let ticks = unix.checked_mul(10_000_000)? + 116_444_736_000_000_000;
+    let ft = FILETIME { dwLowDateTime: ticks as u32, dwHighDateTime: (ticks >> 32) as u32 };
+    let mut utc = SYSTEMTIME::default();
+    let mut local = SYSTEMTIME::default();
+    let mut lft = FILETIME::default();
+    // SAFETY: all pointers refer to initialised locals.
+    unsafe {
+        FileTimeToSystemTime(&ft, &mut utc).ok()?;
+        SystemTimeToTzSpecificLocalTimeEx(None, &utc, &mut local).ok()?;
+        SystemTimeToFileTime(&local, &mut lft).ok()?;
+    }
+    let lticks = ((lft.dwHighDateTime as u64) << 32) | lft.dwLowDateTime as u64;
+    Some((lticks as i64 - ticks as i64) / 10_000_000)
+}

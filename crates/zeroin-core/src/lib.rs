@@ -13,6 +13,7 @@
 #![warn(missing_docs)]
 
 pub mod advisor;
+pub mod cursor;
 pub mod drills;
 pub mod games;
 pub mod history;
@@ -22,3 +23,4 @@ pub mod rng;
 pub mod scoring;
 pub mod search;
 pub mod spring;
+pub mod winmouse;

@@ -88,7 +88,8 @@ pub struct ZeroInApp {
     pub toast: Option<(String, f64)>,
     pub fallback_frac: (f32, f32),
     pub vsync_off: bool,
-    pub cursor_captured: bool,
+    pub cursor: zeroin_core::cursor::CursorCapture,
+    pub win_mouse: crate::screens::winmouse::WinMouseUi,
     pub frame_times: std::collections::VecDeque<f64>,
 }
 
@@ -136,7 +137,8 @@ impl ZeroInApp {
             toast: None,
             fallback_frac: (0.0, 0.0),
             vsync_off: false,
-            cursor_captured: false,
+            cursor: Default::default(),
+            win_mouse: crate::screens::winmouse::WinMouseUi::load(),
             frame_times: Default::default(),
         }
     }
@@ -401,6 +403,7 @@ impl eframe::App for ZeroInApp {
         self.motion.begin_frame(&ctx);
         self.collect_input(&ctx);
         self.poll_llm();
+        self.win_mouse_keys(&ctx);
         self.global_keys(&ctx);
         self.update_vsync(frame);
 
@@ -428,12 +431,29 @@ impl eframe::App for ZeroInApp {
                 ctx.request_repaint_after(std::time::Duration::from_millis(50));
             }
         }
-        self.sync_cursor(&ctx);
+        self.sync_cursor(&ctx, window_hwnd(frame));
+        self.win_mouse_dialog(&ctx);
         self.draw_toast(ui);
         self.motion.end_frame(&ctx);
     }
 
     fn on_exit(&mut self) {
+        self.cursor.force_release();
+        crate::platform::release_cursor();
         self.save_settings();
     }
+}
+
+#[cfg(windows)]
+fn window_hwnd(frame: &eframe::Frame) -> Option<isize> {
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    match frame.window_handle().ok()?.as_raw() {
+        RawWindowHandle::Win32(h) => Some(h.hwnd.get()),
+        _ => None,
+    }
+}
+
+#[cfg(not(windows))]
+fn window_hwnd(_frame: &eframe::Frame) -> Option<isize> {
+    None
 }

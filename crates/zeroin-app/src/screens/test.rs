@@ -129,16 +129,32 @@ impl ZeroInApp {
         self.step = Step::Test;
     }
 
-    pub fn sync_cursor(&mut self, ctx: &egui::Context) {
-        let want = self.in_drill();
-        if want != self.cursor_captured {
-            self.cursor_captured = want;
-            ctx.send_viewport_cmd(egui::ViewportCommand::CursorVisible(!want));
-            ctx.send_viewport_cmd(egui::ViewportCommand::CursorGrab(if want {
-                egui::CursorGrab::Confined
-            } else {
-                egui::CursorGrab::None
-            }));
+    /// Hide and confine the cursor while a drill is live; release it the
+    /// moment the drill ends, pauses, loses focus or is minimised.
+    pub fn sync_cursor(&mut self, ctx: &egui::Context, hwnd: Option<isize>) {
+        let inputs = zeroin_core::cursor::CaptureInputs {
+            drill_active: self.in_drill(),
+            focused: ctx.input(|i| i.focused),
+            minimized: ctx.input(|i| i.viewport().minimized.unwrap_or(false)),
+        };
+        match self.cursor.update(inputs) {
+            Some(zeroin_core::cursor::CaptureAction::Capture) => {
+                if !self.raw.is_native() {
+                    // Development fallback; on Windows the clip is applied natively below.
+                    ctx.send_viewport_cmd(egui::ViewportCommand::CursorGrab(egui::CursorGrab::Confined));
+                }
+            }
+            Some(zeroin_core::cursor::CaptureAction::Release) => release_cursor(ctx),
+            None => {}
+        }
+        if self.cursor.is_captured() {
+            // Every frame: egui shows the cursor again whenever the requested icon changes.
+            ctx.set_cursor_icon(egui::CursorIcon::None);
+            if self.raw.is_native() {
+                if let Some(h) = hwnd {
+                    platform::confine_cursor(h);
+                }
+            }
         }
     }
 
@@ -252,7 +268,8 @@ impl ZeroInApp {
         let mut finished_block = false;
         {
             let Some(t) = self.test.as_mut() else { return };
-            if esc || !focused {
+            let minimized = ctx.input(|i| i.viewport().minimized.unwrap_or(false));
+            if esc || !focused || minimized {
                 t.pause();
                 self.events = events;
                 return;
@@ -431,4 +448,12 @@ impl ZeroInApp {
             }
         }
     }
+}
+
+/// Show the cursor and drop any confinement (both the toolkit's and Windows').
+fn release_cursor(ctx: &egui::Context) {
+    ctx.send_viewport_cmd(egui::ViewportCommand::CursorGrab(egui::CursorGrab::None));
+    ctx.send_viewport_cmd(egui::ViewportCommand::CursorVisible(true));
+    ctx.set_cursor_icon(egui::CursorIcon::Default);
+    platform::release_cursor();
 }

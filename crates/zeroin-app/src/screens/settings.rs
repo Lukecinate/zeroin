@@ -137,15 +137,9 @@ impl ZeroInApp {
                     );
                 }
             }
-            let ms = match self.mouse_settings {
-                Some(m) => format!(
-                    "Pointer speed {} · Enhance pointer precision {}",
-                    m.pointer_speed,
-                    if m.enhance_pointer_precision { "on" } else { "off" }
-                ),
-                None => "Not readable on this platform.".into(),
-            };
+            let ms = self.win_mouse_summary();
             widgets::setting_row(ui, "Windows mouse settings", &ms, |_| {});
+            self.win_mouse_panel(ui, "settings");
             // Haptics
             let mut hap = self.settings.haptics_enabled && self.haptics_available;
             widgets::setting_row(

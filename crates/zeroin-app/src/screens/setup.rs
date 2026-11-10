@@ -471,6 +471,8 @@ impl ZeroInApp {
 Games that use raw input (CS2, Valorant, Apex, Overwatch 2 and most modern shooters) ignore it, but the desktop, menus and games without raw input do not. \
 ZeroIn's drills read raw input, so your result is not affected. Turning it off keeps muscle memory consistent everywhere.",
             );
+            ui.add_space(6.0);
+            self.win_mouse_panel(ui, "setup_accel");
         }
     }
 
@@ -497,6 +499,8 @@ ZeroIn's drills read raw input, so your result is not affected. Turning it off k
                 "At 10, one mouse count moves the cursor one pixel. Other values scale counts, and values below 10 skip some of them, which loses precision on the desktop and in games without raw input. \
 Raw-input games and ZeroIn's drills ignore this setting.",
             );
+            ui.add_space(6.0);
+            self.win_mouse_panel(ui, "setup_speed");
         }
     }
 

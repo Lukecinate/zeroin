@@ -212,6 +212,15 @@ impl ZeroInApp {
         }
         ui.add_space(14.0);
 
+        // Windows pointer settings and where the value goes.
+        ui.label(egui::RichText::new("Use it").font(semibold(16.0)));
+        widgets::dim(ui, format!("Enter {text} in {}'s own sensitivity setting. ZeroIn does not change game files.", s.game.name));
+        ui.add_space(2.0);
+        widgets::dim(ui, format!("Windows: {}", self.win_mouse_summary()));
+        ui.add_space(6.0);
+        self.win_mouse_panel(ui, "result");
+        ui.add_space(14.0);
+
         // Conversions
         ui.label(egui::RichText::new("Same feel in other games").font(semibold(16.0)));
         widgets::dim(ui, format!("At {:.0} DPI, hip-fire.", s.dpi));

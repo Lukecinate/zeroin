@@ -18,6 +18,12 @@ fn load_icon() -> eframe::egui::IconData {
 
 fn main() -> eframe::Result {
     platform::init_clock();
+    // Never leave the cursor confined if something goes wrong mid-drill.
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        platform::release_cursor();
+        default_hook(info);
+    }));
     let viewport = eframe::egui::ViewportBuilder::default()
         .with_title("ZeroIn")
         .with_app_id("ZeroIn")

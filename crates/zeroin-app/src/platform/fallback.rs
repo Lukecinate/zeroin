@@ -26,3 +26,20 @@ pub fn display_info() -> Option<DisplayInfo> {
 pub fn open_folder(path: &std::path::Path) {
     let _ = std::process::Command::new("xdg-open").arg(path).spawn();
 }
+
+pub fn mouse_params() -> Option<zeroin_core::winmouse::MouseParams> {
+    None
+}
+
+pub fn set_mouse_params(_p: zeroin_core::winmouse::MouseParams) -> Result<(), String> {
+    Err("Changing pointer settings is only available on Windows.".into())
+}
+
+pub fn confine_cursor(_hwnd: isize) {}
+
+pub fn release_cursor() {}
+
+/// Not resolved off Windows; dates are shown in UTC there.
+pub fn local_offset_secs(_unix: u64) -> Option<i64> {
+    None
+}

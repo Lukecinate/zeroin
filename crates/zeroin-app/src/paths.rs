@@ -51,3 +51,8 @@ pub fn find_model() -> Option<PathBuf> {
     }
     None
 }
+
+/// Windows pointer settings saved before ZeroIn changed them.
+pub fn mouse_backup_file() -> PathBuf {
+    data_dir().join("mouse-backup.json")
+}
