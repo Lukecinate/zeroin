@@ -1,0 +1,12 @@
+[package]
+name = "zeroin-core"
+description = "Platform-independent sensitivity math, search algorithm, scoring and game database for ZeroIn."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

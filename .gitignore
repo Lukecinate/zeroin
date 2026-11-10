@@ -1,0 +1,6 @@
+/target
+/dist
+/out
+*.gguf
+*.json.tmp
+.DS_Store
