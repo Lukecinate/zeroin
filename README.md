@@ -20,6 +20,7 @@ ZeroIn is an independent project. Its approach (testing candidate sensitivities 
 - **Built for fast hardware.** Raw Input on a dedicated thread with per-report timestamps; measured polling rate and stability (125 Hz to 8000 Hz); refresh-rate detection with a warning when Windows runs the display below its maximum; drills render uncapped with vsync off.
 - **Hall-effect keyboards.** A raw-input keyboard check shows the fastest release-to-press time per key (rapid trigger), and analog key depth when the Wooting Analog SDK is installed.
 - **Results and conversions.** Recommended sensitivity, cm/360, in/360, eDPI and the equivalent in every other supported game. History is saved locally.
+- **Apply to Windows, with undo.** One action sets "Enhance pointer precision" off and pointer speed to 10 for your Windows account, after showing current and new values. Your previous values are saved first and Restore previous puts them back. In-game sensitivity is never written; you enter the recommended value in the game.
 - **Simple to drive.** Three sections (Find my sens, History, Settings), one primary button per screen, Enter for next, Esc for back, number keys for options, F1–F3 for sections.
 
 ## Install
@@ -31,7 +32,7 @@ A portable zip without the model is also published. To add the model to the port
 Verify downloads with `SHA256SUMS.txt` from the same release:
 
 ```powershell
-Get-FileHash .\ZeroIn-Setup-0.1.0-x64.exe -Algorithm SHA256
+Get-FileHash .\ZeroIn-Setup-0.1.1-x64.exe -Algorithm SHA256
 ```
 
 ### Requirements
@@ -41,7 +42,7 @@ Get-FileHash .\ZeroIn-Setup-0.1.0-x64.exe -Algorithm SHA256
 
 ## Privacy
 
-ZeroIn is fully local. It has no accounts, no telemetry, no analytics and makes no network requests. Settings and history are stored in `%APPDATA%\ZeroIn` as JSON. The AI model runs on your CPU and only sees aggregate drill scores.
+ZeroIn is fully local. It has no accounts, no telemetry, no analytics and makes no network requests. Settings, history and the pointer-settings backup are stored in `%APPDATA%\ZeroIn` as JSON. Windows settings are changed only when you confirm Apply to Windows or Restore previous. The AI model runs on your CPU and only sees aggregate drill scores.
 
 ## Build from source
 
@@ -74,7 +75,15 @@ Releases are built by GitHub Actions on `windows-latest` from a version tag ([re
 
 ## Status
 
-Version 0.1.0 is the first public release. Haptic-mouse support is not implemented yet (no open SDK to target); see [CHANGELOG.md](CHANGELOG.md) for what is included and known limitations.
+Version 0.1.1. See [CHANGELOG.md](CHANGELOG.md) for what is included.
+
+### Known issues
+
+- Haptic feedback is not implemented: no haptic mouse offers an open SDK or documented protocol yet.
+- Display refresh is read for the primary display only.
+- Constants for The Finals, Marvel Rivals and PUBG are community estimates; conversions involving them are approximate.
+- The local AI needs a CPU with AVX2/FMA; without it ZeroIn uses its built-in summary.
+- Installer and app are not code-signed yet, so Windows SmartScreen may warn on first run.
 
 ## License
 

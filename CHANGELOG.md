@@ -4,6 +4,17 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [0.1.1] - 2026-11-10
+
+### Added
+- **Apply to Windows** on the Result screen, in Settings, and next to the Setup warnings when acceleration is on or pointer speed is not 10. It sets "Enhance pointer precision" off and pointer speed to 10 (6 of 11) for the current Windows user, after a confirmation that lists current and new values. No admin rights are needed.
+- **Restore previous**: the values from before the change are saved to `%APPDATA%\ZeroIn\mouse-backup.json` first and can be put back from the same places. Both actions read the settings back and report whether Windows accepted them.
+- The Result screen says where the recommended value goes: ZeroIn does not change in-game settings; enter the value in the game.
+
+### Fixed
+- The mouse cursor stayed visible during drills. It is now hidden and confined to the window from the start to the end of each drill, and released immediately on test end, Esc/pause, focus loss (Alt+Tab), minimise, app exit and on a crash. It is hidden again when you continue a paused drill. Drill input still comes from Raw Input, so measurements are unchanged.
+- History showed times in UTC; it now uses the PC's local time zone, including daylight saving time.
+
 ## [0.1.0] - 2026-11-10
 
 First public release.
