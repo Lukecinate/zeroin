@@ -8,7 +8,7 @@ use crate::screens::{result::ResultState, setup::SetupState, test::TestState};
 use crate::theme::*;
 use crate::widgets::{self, Icon};
 use eframe::egui::{self, Align2, Key, Pos2, Rect, Sense, Stroke, Vec2};
-use zeroin_core::history::{load_json, save_json, History, Settings};
+use zeroin_core::history::{load_json, save_json, History, SavedTest, Settings};
 use zeroin_core::polling::{self, PollingStats};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -74,6 +74,8 @@ pub struct ZeroInApp {
     pub setup: SetupState,
     pub test: Option<TestState>,
     pub result: Option<ResultState>,
+    /// Unfinished test found on disk, offered for resuming.
+    pub saved_test: Option<SavedTest>,
     pub raw: RawInput,
     pub events: Vec<InputEvent>,
     pub polling: PollingMeter,
@@ -112,6 +114,14 @@ impl ZeroInApp {
         let mut motion = Motion::default();
         motion.reduce = settings.reduce_motion;
         let setup = SetupState::from_settings(&settings);
+        // An unreadable, outdated or stale unfinished test is simply dropped.
+        let saved_test = load_json::<Option<SavedTest>>(&crate::paths::saved_test_file())
+            .ok()
+            .flatten()
+            .filter(|s| s.is_resumable(crate::screens::test::unix_now()));
+        if saved_test.is_none() {
+            let _ = std::fs::remove_file(crate::paths::saved_test_file());
+        }
         ZeroInApp {
             section: Section::Find,
             step: Step::Setup,
@@ -122,6 +132,7 @@ impl ZeroInApp {
             setup,
             test: None,
             result: None,
+            saved_test,
             // Registered after the main window exists, so our registration is the active one.
             raw: RawInput::start(),
             events: Vec::new(),

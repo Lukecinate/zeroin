@@ -1,4 +1,8 @@
-//! Deterministic iterative-narrowing sensitivity search.
+//! The 0.1 iterative-narrowing sensitivity search.
+//!
+//! Since 0.2 the app uses [`crate::bayes`]. This module is kept because its
+//! [`Observation`] type is part of the history format and so 0.1 results can
+//! still be read and compared.
 //!
 //! The search works on a multiplier `m` of the player's current sensitivity,
 //! in log space (so 0.8× and 1.25× are equally far from 1×). Each round tests
@@ -61,6 +65,8 @@ pub enum RecommendationMethod {
     QuadraticFit,
     /// Best single observation.
     BestObserved,
+    /// The 0.2 grid-posterior search ([`crate::bayes`]).
+    Bayes,
 }
 
 /// Final result of the search.

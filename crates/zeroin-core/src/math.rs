@@ -40,9 +40,34 @@ pub fn windows_pointer_multiplier(speed: u32) -> f64 {
     TABLE[(speed.clamp(1, 20) - 1) as usize]
 }
 
+/// Degrees one screen pixel spans at the centre of a rectilinear view with
+/// horizontal field of view `hfov_deg`, `width_px` pixels wide.
+pub fn deg_per_pixel_at_centre(hfov_deg: f64, width_px: f64) -> f64 {
+    let px_per_unit = (width_px / 2.0) / (hfov_deg.to_radians() / 2.0).tan();
+    (1.0 / px_per_unit.max(1e-9)).atan().to_degrees()
+}
+
+/// True when one mouse count turns the view by more than one pixel at the
+/// screen centre, so the smallest possible aim adjustment skips pixels.
+/// Raising DPI and lowering the in-game sens by the same factor keeps the
+/// cm/360 and removes the skip.
+pub fn skips_pixels(deg_per_count: f64, hfov_deg: f64, width_px: f64) -> bool {
+    width_px > 0.0 && deg_per_count > deg_per_pixel_at_centre(hfov_deg, width_px)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pixel_skip() {
+        // 1920 px at 103° hFOV: about 0.075°/px at the centre.
+        let dpp = deg_per_pixel_at_centre(103.0, 1920.0);
+        assert!((dpp - 0.075).abs() < 0.001, "{dpp}");
+        // Valorant 0.5 at 800 DPI: 0.035°/count, fine. Sens 2.0 at 400 DPI: 0.14°/count, skips.
+        assert!(!skips_pixels(0.07 * 0.5, 103.0, 1920.0));
+        assert!(skips_pixels(0.07 * 2.0, 103.0, 1920.0));
+    }
     use crate::games::{by_id, GameProfile};
 
     fn g(id: &str) -> GameProfile {

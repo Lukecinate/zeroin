@@ -1,7 +1,7 @@
 //! # zeroin-core
 //!
 //! Platform-independent logic for ZeroIn: the game database, sensitivity
-//! math, aim-drill simulation, scoring, the deterministic sensitivity search,
+//! math, aim-drill simulation, scoring, the Bayesian sensitivity search with per-game priors,
 //! validation of local-model advice, polling-rate statistics, spring
 //! animation physics, and the history file format.
 //!
@@ -13,12 +13,15 @@
 #![warn(missing_docs)]
 
 pub mod advisor;
+pub mod bayes;
 pub mod cursor;
 pub mod drills;
 pub mod games;
 pub mod history;
 pub mod math;
+pub mod numbers;
 pub mod polling;
+pub mod priors;
 pub mod rng;
 pub mod scoring;
 pub mod search;

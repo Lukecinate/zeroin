@@ -1,4 +1,5 @@
-//! Result: the recommended sensitivity, why, and the same feel in other games.
+//! Result: keep or change, the range of about-equally-good settings, why,
+//! and the same feel in other games.
 
 use crate::app::{Step, ZeroInApp};
 use crate::llm::JobKind;
@@ -10,38 +11,75 @@ use zeroin_core::advisor::{self, ResultFacts};
 use zeroin_core::games::{by_id, Confidence, GameProfile, GAMES};
 use zeroin_core::history::{ExplanationSource, Session, WindowsMouse};
 use zeroin_core::math;
+use zeroin_core::search::RecommendationMethod;
 
 pub struct ResultState {
     pub session: Session,
     pub explain_job: Option<u64>,
-    pub from_rect: Option<Rect>,
+    /// Facts the model's explanation is checked against.
+    pub facts: OwnedFacts,
     pub kicked: bool,
+}
+
+/// Owned copy of [`ResultFacts`] kept until the model replies.
+pub struct OwnedFacts {
+    pub keep: bool,
+    pub start_text: String,
+    pub recommended_text: String,
+    pub band_text: (String, String),
+    pub gain_pts: f64,
+}
+
+fn facts<'a>(s: &'a Session, f: &OwnedFacts) -> ResultFacts<'a> {
+    ResultFacts {
+        game: &s.game.name,
+        keep: f.keep,
+        start_text: f.start_text.clone(),
+        recommended_text: f.recommended_text.clone(),
+        start_sens: s.start_sens,
+        recommended_sens: s.recommended_sens,
+        band_text: f.band_text.clone(),
+        gain_pts: f.gain_pts,
+        cm360: s.cm360,
+        start_cm360: math::cm_per_360(s.dpi, s.game.model.deg_per_count(s.start_sens)),
+        observations: &s.observations,
+    }
+}
+
+/// Sensitivity for a degrees-per-count multiplier, rounded and clamped to the game's limits.
+pub fn sens_for_mult(p: &GameProfile, start_sens: f64, mult: f64) -> f64 {
+    let mut sens = p.round_sens(p.model.sens_for_deg_per_count(p.model.deg_per_count(start_sens) * mult));
+    if let Some(g) = by_id(&p.id) {
+        sens = sens.clamp(g.sens_min, g.sens_max);
+    }
+    if sens.is_finite() && sens > 0.0 {
+        sens
+    } else {
+        start_sens
+    }
 }
 
 impl ZeroInApp {
     pub fn finish_test(&mut self) {
         let Some(t) = self.test.take() else { return };
-        let Some(rec) = t.search.recommendation() else { return };
-        let mut sens = t.profile.round_sens(t.start_sens * rec.mult);
-        if let Some(g) = by_id(&t.profile.id) {
-            sens = sens.clamp(g.sens_min, g.sens_max);
+        let Some(d) = t.search.decision() else { return };
+        let p = &t.profile;
+        let dec = p.decimals as usize;
+        let sens = if d.keep { t.start_sens } else { sens_for_mult(p, t.start_sens, d.mult) };
+        let (mut lo, mut hi) = (sens_for_mult(p, t.start_sens, d.band.0), sens_for_mult(p, t.start_sens, d.band.1));
+        if lo > hi {
+            std::mem::swap(&mut lo, &mut hi);
         }
-        let cm = math::cm_per_360(t.dpi, t.profile.model.deg_per_count(sens));
-        let start_cm = math::cm_per_360(t.dpi, t.profile.model.deg_per_count(t.start_sens));
-        let obs = t.search.observations().to_vec();
-        let facts = ResultFacts {
-            game: &t.profile.name,
-            start_sens: t.start_sens,
-            recommended_sens: sens,
-            cm360: cm,
-            start_cm360: start_cm,
-            confidence: rec.confidence,
-            observations: &obs,
+        let cm = math::cm_per_360(t.dpi, p.model.deg_per_count(sens));
+        let owned = OwnedFacts {
+            keep: d.keep,
+            start_text: trim_float(t.start_sens, dec),
+            recommended_text: trim_float(sens, dec),
+            band_text: (trim_float(lo, dec), trim_float(hi, dec)),
+            gain_pts: d.gain_pts,
         };
-        let explanation = advisor::fallback_explanation(&facts);
-        let prompt = advisor::explanation_prompt(&facts);
         let now_ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0);
-        let session = Session {
+        let mut session = Session {
             id: format!("{now_ms}"),
             created_unix: (now_ms / 1000) as u64,
             game: t.profile.clone(),
@@ -49,22 +87,31 @@ impl ZeroInApp {
             start_sens: t.start_sens,
             recommended_sens: sens,
             cm360: cm,
-            confidence: rec.confidence,
-            method: rec.method,
-            observations: obs.clone(),
-            explanation,
+            confidence: 0.0,
+            keep: d.keep,
+            band: Some((lo, hi)),
+            gain_pts: Some(d.gain_pts),
+            mode: Some(t.search.config().mode),
+            method: RecommendationMethod::Bayes,
+            observations: t.search.observations().to_vec(),
+            explanation: String::new(),
             explanation_source: ExplanationSource::BuiltIn,
-            model_advised_rounds: t.advised_rounds.clone(),
+            model_advised_rounds: Vec::new(),
             windows_mouse: self
                 .mouse_settings
                 .map(|m| WindowsMouse { pointer_speed: m.pointer_speed, enhance_pointer_precision: m.enhance_pointer_precision }),
             polling_hz: self.polling.last.map(|p| p.rate_hz),
             app_version: env!("CARGO_PKG_VERSION").to_string(),
         };
+        let f = facts(&session, &owned);
+        let explanation = advisor::fallback_explanation(&f);
+        let prompt = advisor::explanation_prompt(&f);
+        session.explanation = explanation;
         self.history.push(session.clone());
         self.save_history();
+        self.discard_saved_test();
         let explain_job = if self.settings.ai_enabled { self.llm.submit(JobKind::Explain, prompt, 220) } else { None };
-        self.result = Some(ResultState { session, explain_job, from_rect: t.best_rect, kicked: false });
+        self.result = Some(ResultState { session, explain_job, facts: owned, kicked: false });
         self.step = Step::Result;
     }
 
@@ -72,33 +119,16 @@ impl ZeroInApp {
         for reply in self.llm.poll() {
             let Ok(text) = reply.text else { continue };
             match reply.kind {
-                JobKind::Advice => {
-                    if let Some(t) = self.test.as_mut() {
-                        if let Some((id, round)) = t.advice_job {
-                            // Only apply while that round has not started yet.
-                            if id == reply.id && round == t.search.round() && t.round_cands.is_none() {
-                                if let Some(a) = advisor::parse_advice(&text, t.search.advice_bounds()) {
-                                    if let Some(m) = t.search.propose_mid(a.next_mult) {
-                                        t.advised_rounds.push(round);
-                                        let reason =
-                                            if a.reason.is_empty() { String::new() } else { format!(" Reason given: {}", a.reason) };
-                                        t.advice_note = Some(format!(
-                                            "Its suggestion ({m:.2}× your start) was checked and kept within this round's range.{reason}"
-                                        ));
-                                    }
-                                }
-                                t.advice_job = None;
-                            }
-                        }
-                    }
-                }
                 JobKind::Explain => {
                     let mut updated = None;
                     if let Some(r) = self.result.as_mut() {
                         if r.explain_job == Some(reply.id) {
                             r.explain_job = None;
                             let clean = advisor::sanitize_explanation(&text, advisor::MAX_EXPLANATION_CHARS);
-                            if clean.chars().count() >= 40 {
+                            // The model may only explain: text that states other numbers is dropped.
+                            let ok =
+                                clean.chars().count() >= 40 && advisor::explanation_is_consistent(&clean, &facts(&r.session, &r.facts));
+                            if ok {
                                 r.session.explanation = clean;
                                 r.session.explanation_source = ExplanationSource::LocalModel;
                                 updated = Some(r.session.clone());
@@ -126,22 +156,20 @@ impl ZeroInApp {
         let s = r.session.clone();
         let dec = s.game.decimals as usize;
         widgets::caption(ui, "RESULT");
-        ui.label(egui::RichText::new(format!("Your {} sensitivity", s.game.name)).font(semibold(18.0)).color(TEXT_DIM));
+        let headline =
+            if s.keep { format!("Keep your current {} sensitivity", s.game.name) } else { format!("Your new {} sensitivity", s.game.name) };
+        ui.label(egui::RichText::new(headline).font(semibold(18.0)).color(TEXT_DIM));
 
-        // Hero number with a shared-element entrance from "Best so far".
+        // Hero number with a short entrance.
         let text = trim_float(s.recommended_sens, dec);
         let size = 88.0;
         let (slot, _) = ui.allocate_exact_size(egui::vec2(ui.available_width().min(620.0), size * 1.1), egui::Sense::hover());
         let target = Pos2::new(slot.left(), slot.center().y);
         if !r.kicked {
             r.kicked = true;
-            let (fx, fy, fs) = match r.from_rect {
-                Some(fr) => (fr.left(), fr.center().y, 16.0),
-                None => (target.x, target.y + 24.0, size * 0.8),
-            };
-            self.motion.kick(crate::motion::id("hero_x"), fx, target.x);
-            self.motion.kick(crate::motion::id("hero_y"), fy, target.y);
-            self.motion.kick(crate::motion::id("hero_s"), fs, size);
+            self.motion.kick(crate::motion::id("hero_x"), target.x, target.x);
+            self.motion.kick(crate::motion::id("hero_y"), target.y + 24.0, target.y);
+            self.motion.kick(crate::motion::id("hero_s"), size * 0.8, size);
         }
         let x = self.motion.value(crate::motion::id("hero_x"), target.x);
         let y = self.motion.value(crate::motion::id("hero_y"), target.y);
@@ -152,33 +180,49 @@ impl ZeroInApp {
         let dpc = s.game.model.deg_per_count(s.recommended_sens);
         ui.label(
             egui::RichText::new(format!(
-                "{:.1} cm/360  ·  {:.2} in/360  ·  eDPI {:.0}  ·  {:.0} DPI",
-                s.cm360,
+                "about {:.1} cm/360  ·  {:.2} in/360  ·  eDPI {:.0}  ·  {:.0} DPI",
+                advisor::half(s.cm360),
                 math::inches_per_360(s.dpi, dpc),
                 math::edpi(s.dpi, s.recommended_sens),
                 s.dpi
             ))
             .font(semibold(16.0)),
         );
-        let change = s.recommended_sens / s.start_sens - 1.0;
-        widgets::dim(
-            ui,
-            format!("Started at {} ({}{:.0}%)", trim_float(s.start_sens, dec), if change >= 0.0 { "+" } else { "−" }, change.abs() * 100.0),
-        );
-        ui.add_space(6.0);
-        // Confidence bar
-        let (bar, _) = ui.allocate_exact_size(egui::vec2(260.0, 6.0), egui::Sense::hover());
-        ui.painter().rect_filled(bar, radius(3), SURFACE_HI);
-        let w = self.motion.value(crate::motion::id("conf_bar"), bar.width() * s.confidence as f32);
-        ui.painter().rect_filled(Rect::from_min_size(bar.min, egui::vec2(w, bar.height())), radius(3), TEXT_DIM);
-        widgets::dim(
-            ui,
-            format!(
-                "Confidence {:.0}%{}",
-                s.confidence * 100.0,
-                if s.confidence < 0.5 { " — scores were close; a second run helps" } else { "" }
-            ),
-        );
+        if s.keep {
+            widgets::dim(ui, "No tested setting scored clearly better than the one you already use.");
+        } else {
+            let change = s.recommended_sens / s.start_sens - 1.0;
+            widgets::dim(
+                ui,
+                format!(
+                    "Started at {} ({}{:.0}%). Predicted gain: about {} on the 100-point block score.",
+                    trim_float(s.start_sens, dec),
+                    if change >= 0.0 { "+" } else { "−" },
+                    change.abs() * 100.0,
+                    match s.gain_pts.unwrap_or(0.0).round() as i64 {
+                        ..=1 => "1 point".to_string(),
+                        n => format!("{n} points"),
+                    }
+                ),
+            );
+        }
+        ui.add_space(10.0);
+        if let Some((lo, hi)) = s.band {
+            let cm_lo = math::cm_per_360(s.dpi, s.game.model.deg_per_count(hi));
+            let cm_hi = math::cm_per_360(s.dpi, s.game.model.deg_per_count(lo));
+            ui.label(
+                egui::RichText::new(format!(
+                    "About equally good: {} to {}  ({:.0}–{:.0} cm/360)",
+                    trim_float(lo, dec),
+                    trim_float(hi, dec),
+                    cm_lo,
+                    cm_hi
+                ))
+                .font(semibold(15.0)),
+            );
+            band_chart(ui, &s, lo, hi, ui.available_width().min(620.0));
+            widgets::dim(ui, "Anything in this range performed within about 2 points of the best. Pick what feels right in game.");
+        }
         ui.add_space(14.0);
 
         let waiting = r.explain_job.is_some();
@@ -200,16 +244,11 @@ impl ZeroInApp {
                 ui.ctx().request_repaint_after(std::time::Duration::from_millis(200));
             }
         });
-        if !s.model_advised_rounds.is_empty() {
+        if s.explanation_source == ExplanationSource::LocalModel {
             ui.add_space(6.0);
-            widgets::dim(
-                ui,
-                format!(
-                    "The local AI suggested the middle candidate in {} round(s); every suggestion was clamped to the algorithm's range.",
-                    s.model_advised_rounds.len()
-                ),
-            );
+            widgets::dim(ui, "The local AI only writes this text. Every number on this screen comes from the test itself.");
         }
+        self.pixel_skip_notice(ui, &s.game, s.dpi, s.recommended_sens);
         ui.add_space(14.0);
 
         // Windows pointer settings and where the value goes.
@@ -257,8 +296,6 @@ impl ZeroInApp {
         });
         ui.add_space(10.0);
         widgets::key_hint(ui, &[("Enter", "done"), ("Esc", "back to setup")]);
-        let _ = Stroke::NONE;
-        let _ = Tone::Info;
 
         if enter {
             done = true;
@@ -274,5 +311,65 @@ impl ZeroInApp {
             self.setup.sub = SetupStep::Ready;
             self.step = Step::Setup;
         }
+    }
+}
+
+/// Tested positions, the equally-good band and the current / recommended
+/// markers on one horizontal axis (log scale).
+fn band_chart(ui: &mut egui::Ui, s: &Session, lo: f64, hi: f64, width: f32) {
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(width, 46.0), egui::Sense::hover());
+    let p = ui.painter();
+    let tested: Vec<f64> = s.observations.iter().map(|o| o.mult.ln()).collect();
+    let m = s.game.model;
+    let rel = |sens: f64| (m.deg_per_count(sens) / m.deg_per_count(s.start_sens)).ln();
+    let (x_lo, x_hi, x_rec) = (rel(lo), rel(hi), rel(s.recommended_sens));
+    let min = tested.iter().cloned().fold(x_lo.min(0.0), f64::min) - 0.08;
+    let max = tested.iter().cloned().fold(x_hi.max(0.0), f64::max) + 0.08;
+    let to_x = |v: f64| rect.left() + ((v - min) / (max - min).max(1e-6)) as f32 * rect.width();
+    let axis_y = rect.top() + 18.0;
+    p.rect_filled(Rect::from_min_max(Pos2::new(rect.left(), axis_y - 2.0), Pos2::new(rect.right(), axis_y + 2.0)), radius(2), SURFACE_HI);
+    p.rect_filled(
+        Rect::from_min_max(Pos2::new(to_x(x_lo), axis_y - 5.0), Pos2::new(to_x(x_hi).max(to_x(x_lo) + 4.0), axis_y + 5.0)),
+        radius(3),
+        TEXT_FAINT,
+    );
+    for v in &tested {
+        p.circle_filled(Pos2::new(to_x(*v), axis_y), 2.5, TEXT_DIM);
+    }
+    // Current sens: a tick; recommendation: a coral dot.
+    let cx = to_x(0.0);
+    p.line_segment([Pos2::new(cx, axis_y - 10.0), Pos2::new(cx, axis_y + 10.0)], Stroke::new(2.0, TEXT));
+    p.circle_filled(Pos2::new(to_x(x_rec), axis_y), 6.0, CORAL);
+    let lbl_y = rect.bottom() - 6.0;
+    p.text(Pos2::new(cx, lbl_y), Align2::CENTER_CENTER, "current", regular(11.5), TEXT_DIM);
+    if (to_x(x_rec) - cx).abs() > 50.0 {
+        p.text(Pos2::new(to_x(x_rec), lbl_y), Align2::CENTER_CENTER, "recommended", regular(11.5), CORAL);
+    }
+}
+
+impl ZeroInApp {
+    /// Warn when one mouse count turns the view by more than a screen pixel.
+    pub fn pixel_skip_notice(&mut self, ui: &mut egui::Ui, game: &GameProfile, dpi: f64, sens: f64) {
+        let width_px =
+            self.display.map(|d| d.width as f64).unwrap_or_else(|| (ui.ctx().content_rect().width() * ui.ctx().pixels_per_point()) as f64);
+        let dpc = game.model.deg_per_count(sens);
+        if !math::skips_pixels(dpc, game.hfov_deg, width_px) {
+            return;
+        }
+        let dpp = math::deg_per_pixel_at_centre(game.hfov_deg, width_px);
+        let k = if dpc / dpp <= 2.0 { 2.0 } else { 4.0 };
+        let new_dpi = (dpi * k).min(32000.0);
+        let new_sens = game.round_sens(math::convert(sens, game, dpi, game, new_dpi));
+        widgets::notice(
+            ui,
+            Tone::Warn,
+            "Aim steps skip pixels",
+            &format!(
+                "At {} and {dpi:.0} DPI one mouse count turns {dpc:.3}°, more than one pixel ({dpp:.3}°) at the centre of a {width_px:.0}-pixel-wide screen, so the finest aim adjustment jumps. \
+For the same cm/360 with finer steps, set your mouse to {new_dpi:.0} DPI and the in-game sensitivity to {}.",
+                trim_float(sens, game.decimals as usize),
+                trim_float(new_sens, game.decimals as usize)
+            ),
+        );
     }
 }

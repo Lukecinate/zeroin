@@ -43,7 +43,7 @@ impl LlmStatus {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum JobKind {
-    Advice,
+    /// Plain-language explanation of a computed result. The model has no other job.
     Explain,
 }
 

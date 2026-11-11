@@ -9,9 +9,15 @@
 //! | control  | 0.20 | low overshoot relative to distance, few corrections (hits only) |
 //! | tracking | 0.20 | time on target and mean error |
 //!
-//! `bias` is the mean signed first-stop error relative to distance: positive
-//! means the player tends to overshoot (sensitivity likely too high), negative
-//! means they stop short (likely too low). The search uses it as a tie-breaker.
+//! Since 0.2 the search objective is [`Score::v2`] (spec 10 §5): a Fitts
+//! effective-throughput pointing term and a tracking term measured over raw
+//! input time. `total` and its components are still computed for display and
+//! for comparing with 0.1 history.
+//!
+//! `bias` is the mean signed first-stop error relative to distance. People
+//! stop short of targets by about 11 % on average whatever their sensitivity,
+//! so [`Score::bias_corrected`] subtracts that baseline before any advice is
+//! given. Neither value moves the search.
 
 use crate::drills::{BlockResult, TrialResult};
 use serde::{Deserialize, Serialize};
@@ -36,6 +42,61 @@ pub struct Score {
     pub bias: f64,
     /// Median time to target over hits, ms.
     pub median_ttt_ms: f64,
+    /// Block score v2 (0–100): `100 · (0.6 · pointing + 0.4 · tracking_v2)`. The search objective.
+    #[serde(default)]
+    pub v2: f64,
+    /// Pointing term of v2 (0–1).
+    #[serde(default)]
+    pub pointing: f64,
+    /// Effective throughput in bits/s.
+    #[serde(default)]
+    pub throughput: f64,
+    /// Tracking term of v2 (0–1), from time on target and RMS error.
+    #[serde(default)]
+    pub tracking_v2: f64,
+    /// `bias` minus the population baseline of −0.11 (0 = typical).
+    #[serde(default)]
+    pub bias_corrected: f64,
+}
+
+/// Typical primary-submovement endpoint error relative to distance: people
+/// undershoot by about 11 % regardless of sensitivity.
+pub const UNDERSHOOT_BASELINE: f64 = -0.11;
+/// Fixed movement time charged for a miss, in seconds.
+pub const MISS_TIME_S: f64 = 1.5;
+
+/// Effective throughput (bits/s) and the pointing term of score v2.
+pub fn pointing_v2(trials: &[&TrialResult]) -> (f64, f64) {
+    if trials.is_empty() {
+        return (0.0, 0.0);
+    }
+    let n = trials.len() as f64;
+    let rel: Vec<f64> = trials.iter().map(|t| t.first_stop_error_deg / t.distance_deg.max(1e-6)).collect();
+    let mean = rel.iter().sum::<f64>() / n;
+    let sd = if trials.len() > 1 { (rel.iter().map(|r| (r - mean).powi(2)).sum::<f64>() / (n - 1.0)).sqrt() } else { 0.0 };
+    let tpe = trials
+        .iter()
+        .map(|t| {
+            let a = t.distance_deg.max(1e-6);
+            let we = (4.133 * sd * a).max(0.5 * 2.0 * t.radius_deg).max(1e-6);
+            let ide = (a / we + 1.0).log2();
+            let mte = if t.hit { (t.click_ms / 1000.0).max(0.05) } else { MISS_TIME_S };
+            ide / mte
+        })
+        .sum::<f64>()
+        / n;
+    let hit_rate = trials.iter().filter(|t| t.hit).count() as f64 / n;
+    (tpe, (tpe / THROUGHPUT_REF).min(1.0) * (0.5 + 0.5 * hit_rate))
+}
+
+/// Tracking term of score v2.
+pub fn tracking_v2(tr: &crate::drills::TrackingResult) -> f64 {
+    if tr.radius_deg <= 0.0 {
+        return 0.0;
+    }
+    // History from 0.1 has no RMS; fall back to the mean error.
+    let rms = if tr.rms_error_deg > 0.0 { tr.rms_error_deg } else { tr.mean_error_deg };
+    (0.7 * tr.on_target + 0.3 * (1.0 - rms / (4.0 * tr.radius_deg)).clamp(0.0, 1.0)).clamp(0.0, 1.0)
 }
 
 fn median(mut v: Vec<f64>) -> f64 {
@@ -97,7 +158,14 @@ pub fn score_block(r: &BlockResult) -> Score {
     };
 
     let total = 100.0 * (WEIGHTS[0] * accuracy + WEIGHTS[1] * speed + WEIGHTS[2] * control + WEIGHTS[3] * tracking);
+    let (throughput, pointing) = pointing_v2(&trials);
+    let t2 = tracking_v2(tr);
     Score {
+        v2: 100.0 * (0.6 * pointing + 0.4 * t2),
+        pointing,
+        throughput,
+        tracking_v2: t2,
+        bias_corrected: if trials.is_empty() { 0.0 } else { bias - UNDERSHOOT_BASELINE },
         total,
         accuracy,
         speed,
@@ -123,6 +191,8 @@ mod tests {
             overshoot_deg: overshoot,
             first_stop_error_deg: stop,
             corrections: corr,
+            anticipated: false,
+            timed_out: false,
         }
     }
 
@@ -131,23 +201,45 @@ mod tests {
         let good = BlockResult {
             flicks: vec![trial(true, 400.0, 0.2, 0.1, 0); 8],
             micros: vec![],
-            tracking: TrackingResult { on_target: 0.8, mean_error_deg: 1.0, radius_deg: 2.0 },
+            tracking: TrackingResult { on_target: 0.8, mean_error_deg: 1.0, radius_deg: 2.0, rms_error_deg: 1.2 },
+            input_gaps: 0,
         };
         let bad = BlockResult {
             flicks: vec![trial(false, 900.0, 6.0, 5.0, 3); 8],
             micros: vec![],
-            tracking: TrackingResult { on_target: 0.2, mean_error_deg: 6.0, radius_deg: 2.0 },
+            tracking: TrackingResult { on_target: 0.2, mean_error_deg: 6.0, radius_deg: 2.0, rms_error_deg: 7.0 },
+            input_gaps: 0,
         };
         let (g, b) = (score_block(&good), score_block(&bad));
         assert!(g.total > b.total + 30.0, "{g:?} {b:?}");
         assert!(b.bias > 0.1);
         assert!((0.0..=100.0).contains(&g.total));
+        assert!(g.v2 > b.v2 + 30.0, "{g:?} {b:?}");
+        assert!((0.0..=100.0).contains(&g.v2));
+    }
+
+    #[test]
+    fn undershoot_baseline_is_removed() {
+        let r = BlockResult { flicks: vec![trial(true, 400.0, 0.0, -3.3, 0); 6], ..Default::default() };
+        let s = score_block(&r);
+        assert!((s.bias + 0.11).abs() < 1e-9);
+        assert!(s.bias_corrected.abs() < 1e-9);
+    }
+
+    #[test]
+    fn v2_rewards_speed_at_equal_accuracy() {
+        let fast = BlockResult { flicks: vec![trial(true, 350.0, 0.0, -1.0, 0); 6], ..Default::default() };
+        let slow = BlockResult { flicks: vec![trial(true, 700.0, 0.0, -1.0, 0); 6], ..Default::default() };
+        assert!(score_block(&fast).v2 > score_block(&slow).v2);
+        // A miss costs a fixed 1.5 s.
+        let miss = BlockResult { flicks: vec![trial(false, 300.0, 0.0, -1.0, 0); 6], ..Default::default() };
+        assert!(score_block(&miss).v2 < score_block(&slow).v2);
     }
 
     #[test]
     fn empty_block_is_zero_not_nan() {
         let s = score_block(&BlockResult::default());
-        assert!(s.total.is_finite());
+        assert!(s.total.is_finite() && s.v2.is_finite());
         assert_eq!(s.accuracy, 0.0);
     }
 

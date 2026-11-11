@@ -22,8 +22,11 @@ jobs:
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --all -- --check
-      - run: cargo test -p zeroin-core --locked
-      - run: cargo clippy -p zeroin-core --locked -- -D warnings
+      - run: cargo test -p zeroin-core --locked --lib
+      - run: cargo test -p zeroin-core --locked --doc
+      - name: Search simulation regression gate
+        run: cargo test -p zeroin-core --locked --test sim_regression -- --nocapture
+      - run: cargo clippy -p zeroin-core --all-targets --locked -- -D warnings
 
   windows:
     name: App build and tests (Windows, no AI)

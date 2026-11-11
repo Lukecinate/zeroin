@@ -2,7 +2,7 @@
 
 **Direction:** a calm, precise instrument. One decision per screen; the number is the hero.
 
-- **Palette.** Dark neutrals (`#111214` background, `#191A1D` surfaces, `#2B2D32` borders), off-white text, one coral accent `#FF5C47` taken from the logo. Coral is reserved for the primary action, the active navigation marker, drill targets and the result number. Amber marks warnings and estimates.
+- **Palette.** Dark neutrals (`#111214` background, `#191A1D` surfaces, `#2B2D32` borders), off-white text, one coral accent `#FF5C47` taken from the logo. Coral is reserved for the primary action, the active navigation marker, drill targets, progress bars and the result number with its marker. Amber marks warnings and estimates.
 - **No decoration without a reason.** No gradients, glass, glow or decorative shadows. Corner radius 8 px for controls and 12 px for cards.
 - **Type.** Plus Jakarta Sans (regular, semibold, bold).
 - **Icons.** Lucide, one family, 1.75 px stroke, tinted per state.

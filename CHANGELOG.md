@@ -4,6 +4,36 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [0.2.0] - 2026-11-11
+
+### Changed
+- **New search.** A test is now a budget of blocks at one sensitivity each instead of rounds of three candidates. Blocks 1–3 bracket the current setting (×1, ×1.6, ×0.625); later blocks are placed from a grid posterior over the best setting, the score curvature and a per-block drift, never more than ×1.25 from the previous block. The prior combines the current sensitivity with a per-game population prior built offline from public aggregate pro-settings statistics.
+- **Keep unless it clearly helps.** A change is recommended only when the predicted gain reaches the threshold of the chosen mode: Conservative (2 points), Balanced (1 point, default) or Explorer (0.5 points). Otherwise the result is "Keep your current sens". A single session moves at most ×0.5–×2.
+- **Drills and scoring.** Each block runs 2 unscored warm-up flicks, 6 flicks stratified over the distance range, 5 micro-adjusts and 5 s of tracking. Every block in a test uses the same targets in a new order. Target sizes follow the game type (tactical, balanced, tracking-heavy). The search objective is the new score v2: effective Fitts throughput with hit rate, plus tracking measured over raw-input time instead of frame time.
+- **Result screen.** Shows the range of settings within about 2 points of the best, with a chart of the tested settings, the current value and the recommendation. The confidence percentage is removed: simulated interval coverage did not support a probability. cm/360 is shown to the nearest half centimetre.
+- **Local AI.** The model only writes the explanation; it no longer proposes test settings. An explanation that mentions confidence or contains a decimal number that is not one of the result's figures is discarded in favour of the built-in summary.
+- Test length: Quick is 6 blocks (about 2.5 min), Standard 9 blocks (about 4 min). The Rounds setting is replaced by the mode setting.
+
+### Added
+- Session budget: a segmented progress bar and the time left between blocks, and session progress and time left during drills.
+- Resume: progress is saved after every block to `%APPDATA%\ZeroIn\unfinished-test.json`, and Setup offers to resume an interrupted test for 24 hours.
+- Block validity: a block is run again when the app stutters (a frame over 250 ms, or three over 100 ms), mouse input stops for over 250 ms mid-movement, more than two clicks come under 120 ms after a target appears, or more than three targets time out. Up to two re-runs; a third unusable block ends with "Test incomplete" and nothing is saved. A result needs at least 6 valid blocks.
+- Clicks under 120 ms after a target appears count as misses (anticipations).
+- Number entry accepts a decimal point or comma; DPI typed as 1.600, 1,600 or 1 600 is read as 1600 and the screen says so.
+- Pixel-skip warning on Setup and Result when one mouse count turns the view by more than one pixel at the screen centre, with a DPI and sensitivity pair that keeps the same cm/360.
+- CI runs a simulation regression check of the search (30 synthetic players × 20 starting points, Quick and Standard).
+- Data-source attribution for the per-game priors in THIRD_PARTY_NOTICES.md (CSDB.gg, SensLab, EsportSettings, Boudaoud et al. 2022).
+
+### Fixed
+- Aim-bias advice is corrected for the typical 11 % undershoot, and the bias no longer moves the search. In 0.1 the uncorrected bias nudged results towards faster settings.
+- The drill crosshair is drawn in whole physical pixels, so it stays sharp at 125 % and 150 % display scaling.
+
+### Known limitations
+- The search was tuned in simulation with synthetic players; no study with real players has been run yet.
+- The polling-jitter validity rule is not implemented.
+- What one session learns is not carried into the next session's prior.
+- The pixel-skip check uses the primary display's width and the game's default field of view.
+
 ## [0.1.1] - 2026-11-10
 
 ### Added

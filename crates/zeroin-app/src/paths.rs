@@ -26,6 +26,11 @@ pub fn settings_file() -> PathBuf {
     data_dir().join("settings.json")
 }
 
+/// The unfinished test, saved after every block so it can be resumed.
+pub fn saved_test_file() -> PathBuf {
+    data_dir().join("unfinished-test.json")
+}
+
 /// Folders searched for a `.gguf` model, in order.
 pub fn model_dirs() -> Vec<PathBuf> {
     let mut v = Vec::new();

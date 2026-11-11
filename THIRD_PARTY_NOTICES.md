@@ -25,6 +25,23 @@ The model weights are unmodified. Apache-2.0 permits redistribution with the lic
 | serde, serde_json | Settings and history files | MIT OR Apache-2.0 |
 | libloading | Optional SDK loading | ISC |
 
+## Data sources
+
+The per-game starting prior in `crates/zeroin-core/src/priors.rs` (a median
+cm/360 and spread per game) was derived offline from public aggregate
+statistics, read on 11 November 2026. Only summary figures were used: no
+per-player data, no crawling, and no text or charts were copied. Nothing is
+fetched at runtime.
+
+| Source | Figures used |
+|---|---|
+| CSDB.gg, "What Sensitivity Do CS2 Pros Use?" (data as of 9 Nov 2026), https://csdb.gg/data/pro-sensitivity/ | CS2 median eDPI and quartiles. Data provided by CSDB.gg, free to use with attribution. |
+| SensLab, "Pro Settings Statistics" (data updated 21 Oct 2026), https://senslab.pro/pro-settings-statistics | Median cm/360 and eDPI quartiles for Valorant, CS2, Apex Legends, Overwatch 2, Fortnite, Rainbow Six Siege, Marvel Rivals, The Finals and Call of Duty |
+| EsportSettings, "Average Pro Settings by Game", https://esportsettings.com/blog/average-pro-settings-by-game/ | Median and 10th–90th percentile cm/360 for CS2, Valorant, Fortnite and Apex Legends |
+| Boudaoud, Spjut, Kim et al., "Mouse Sensitivity Effects in First-Person Targeting Tasks", CHI 2022 (arXiv:2203.12050) | Width check for the generic prior |
+
+These sources are not affiliated with ZeroIn.
+
 The full dependency tree and its licences can be listed with `cargo tree` and
 [`cargo about`](https://github.com/EmbarkStudios/cargo-about) or
 [`cargo deny`](https://github.com/EmbarkStudios/cargo-deny) (`cargo deny list`).

@@ -2,6 +2,8 @@
 //!
 //! On Windows the app stores them in `%APPDATA%\ZeroIn`. Nothing is uploaded.
 
+use crate::bayes::{BayesSearch, Mode};
+use crate::drills::{DrillPlan, Preset};
 use crate::games::GameProfile;
 use crate::search::{Observation, RecommendationMethod};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
@@ -49,8 +51,21 @@ pub struct Session {
     pub recommended_sens: f64,
     /// cm/360 at the recommendation.
     pub cm360: f64,
-    /// Confidence 0–1.
+    /// 0.1 only: confidence 0–1. Not computed or shown since 0.2.
+    #[serde(default)]
     pub confidence: f64,
+    /// 0.2: the advice was to keep the starting sensitivity.
+    #[serde(default)]
+    pub keep: bool,
+    /// 0.2: range of about-equally-good sensitivities (low, high).
+    #[serde(default)]
+    pub band: Option<(f64, f64)>,
+    /// 0.2: predicted gain of moving, in score points.
+    #[serde(default)]
+    pub gain_pts: Option<f64>,
+    /// 0.2: decision mode used.
+    #[serde(default)]
+    pub mode: Option<Mode>,
     /// How the recommendation was derived.
     pub method: RecommendationMethod,
     /// All scored candidates.
@@ -59,7 +74,7 @@ pub struct Session {
     pub explanation: String,
     /// Source of the explanation.
     pub explanation_source: ExplanationSource,
-    /// Rounds where the local model's suggestion was used for the middle candidate.
+    /// 0.1 only: rounds where the local model's suggestion was used for the middle candidate.
     #[serde(default)]
     pub model_advised_rounds: Vec<u32>,
     /// Windows mouse settings, when readable.
@@ -107,10 +122,20 @@ impl History {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TestLength {
-    /// ~15 s per candidate.
+    /// 6 blocks (3 bracket + 3 adaptive), about 2.5 minutes.
     Quick,
-    /// ~25 s per candidate.
+    /// 9 blocks, about 4 minutes.
     Standard,
+}
+
+impl TestLength {
+    /// Planned valid blocks.
+    pub fn blocks(self) -> u32 {
+        match self {
+            TestLength::Quick => 6,
+            TestLength::Standard => 9,
+        }
+    }
 }
 
 /// User settings.
@@ -125,8 +150,10 @@ pub struct Settings {
     pub analog_keyboard_enabled: bool,
     /// Test length.
     pub test_length: TestLength,
-    /// Search rounds (3–5).
+    /// 0.1 only: search rounds. Ignored since 0.2.
     pub rounds: u32,
+    /// How readily a change is recommended.
+    pub mode: Mode,
     /// Reduce interface motion.
     pub reduce_motion: bool,
     /// Last used game id.
@@ -143,10 +170,59 @@ impl Default for Settings {
             analog_keyboard_enabled: true,
             test_length: TestLength::Standard,
             rounds: 4,
+            mode: Mode::Balanced,
             reduce_motion: false,
             last_game: None,
             last_dpi: None,
         }
+    }
+}
+
+/// Current saved-test schema version.
+pub const SAVED_TEST_VERSION: u32 = 1;
+/// A saved test older than this is not offered for resuming.
+pub const RESUME_MAX_AGE_S: u64 = 24 * 3600;
+/// Re-runs allowed per test for invalid blocks.
+pub const MAX_RERUNS: u32 = 2;
+
+/// An unfinished test, saved after every block so it can be resumed.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SavedTest {
+    /// Schema version.
+    pub version: u32,
+    /// Unix time the test started.
+    pub created_unix: u64,
+    /// Unix time of the last save.
+    pub saved_unix: u64,
+    /// Identity of the setup inputs (game, DPI, sens); resuming requires a match.
+    pub fingerprint: String,
+    /// Game tested.
+    pub game: GameProfile,
+    /// Mouse DPI.
+    pub dpi: f64,
+    /// Starting sensitivity.
+    pub start_sens: f64,
+    /// Target geometry preset.
+    pub preset: Preset,
+    /// Block plan.
+    pub plan: DrillPlan,
+    /// Seed of the paired target set.
+    pub pair_seed: u64,
+    /// Search state with every valid block so far.
+    pub search: BayesSearch,
+    /// Invalid blocks so far (each one was re-run).
+    pub invalid_blocks: u32,
+    /// Seconds each finished block took, for the time estimate.
+    pub block_seconds: Vec<f64>,
+}
+
+impl SavedTest {
+    /// True when the file is a version this build understands and recent enough to resume.
+    pub fn is_resumable(&self, now_unix: u64) -> bool {
+        self.version == SAVED_TEST_VERSION
+            && now_unix.saturating_sub(self.saved_unix) <= RESUME_MAX_AGE_S
+            && !self.search.is_done()
+            && self.search.blocks_done() > 0
     }
 }
 
@@ -195,6 +271,10 @@ mod tests {
             recommended_sens: 1.1,
             cm360: 47.2,
             confidence: 0.7,
+            keep: false,
+            band: Some((1.0, 1.2)),
+            gain_pts: Some(1.5),
+            mode: Some(Mode::Balanced),
             method: RecommendationMethod::QuadraticFit,
             observations: vec![],
             explanation: "x".into(),
@@ -243,9 +323,53 @@ mod tests {
     }
 
     #[test]
+    fn reads_a_0_1_session() {
+        let mut v = serde_json::to_value(session("old")).unwrap();
+        for k in ["keep", "band", "gain_pts", "mode"] {
+            v.as_object_mut().unwrap().remove(k);
+        }
+        let s: Session = serde_json::from_value(v).unwrap();
+        assert!(!s.keep && s.band.is_none());
+    }
+
+    #[test]
+    fn saved_test_round_trip_and_age() {
+        use crate::bayes::BayesConfig;
+        use crate::scoring::Score;
+        let mut search = BayesSearch::new(BayesConfig::new(6, Mode::Balanced, 0.0, 0.4));
+        search.record(1.0, Score { v2: 50.0, ..Default::default() });
+        let t = SavedTest {
+            version: SAVED_TEST_VERSION,
+            created_unix: 100,
+            saved_unix: 200,
+            fingerprint: "fp".into(),
+            game: GameProfile::from_game(by_id("cs2").unwrap()),
+            dpi: 800.0,
+            start_sens: 1.0,
+            preset: Preset::Tactical,
+            plan: DrillPlan::for_preset(Preset::Tactical),
+            pair_seed: 42,
+            search,
+            invalid_blocks: 1,
+            block_seconds: vec![31.0],
+        };
+        let d = tmpdir();
+        let p = d.join("session.json");
+        save_json(&p, &t).unwrap();
+        let back: Option<SavedTest> = load_json(&p).unwrap();
+        let back = back.unwrap();
+        assert_eq!(back.search.blocks_done(), 1);
+        assert_eq!(back.pair_seed, 42);
+        assert!(back.is_resumable(300));
+        assert!(!back.is_resumable(200 + RESUME_MAX_AGE_S + 1));
+        std::fs::remove_dir_all(d).ok();
+    }
+
+    #[test]
     fn settings_tolerate_missing_fields() {
         let s: Settings = serde_json::from_str("{\"rounds\": 3}").unwrap();
         assert_eq!(s.rounds, 3);
         assert!(s.ai_enabled);
+        assert_eq!(s.mode, Mode::Balanced);
     }
 }

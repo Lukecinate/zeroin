@@ -97,9 +97,13 @@ impl ZeroInApp {
                 child.add_space(4.0);
                 child.label(
                     egui::RichText::new(format!(
-                        "Started at {} · confidence {:.0}% · {} candidates tested{}",
+                        "Started at {}{} · {} blocks{}",
                         trim_float(s.start_sens, dec),
-                        s.confidence * 100.0,
+                        match (s.keep, s.band) {
+                            (true, Some((lo, hi))) => format!(" · kept · equally good {}–{}", trim_float(lo, dec), trim_float(hi, dec)),
+                            (false, Some((lo, hi))) => format!(" · equally good {}–{}", trim_float(lo, dec), trim_float(hi, dec)),
+                            _ => String::new(),
+                        },
                         s.observations.len(),
                         s.windows_mouse
                             .map(|m| format!(

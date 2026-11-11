@@ -7,6 +7,7 @@ use eframe::egui::{self, Key};
 use zeroin_core::games::{Confidence, GameProfile, GAMES};
 use zeroin_core::history::Settings;
 use zeroin_core::math;
+use zeroin_core::numbers;
 
 pub const DPI_OPTIONS: [f64; 5] = [400.0, 800.0, 1200.0, 1600.0, 3200.0];
 
@@ -51,8 +52,7 @@ pub struct SetupState {
 pub const CUSTOM_IDX: usize = GAMES.len();
 
 fn parse_num(s: &str) -> Option<f64> {
-    let v: f64 = s.trim().replace(',', ".").parse().ok()?;
-    v.is_finite().then_some(v)
+    numbers::parse_decimal(s).ok().map(|p| p.value)
 }
 
 impl SetupState {
@@ -87,7 +87,11 @@ impl SetupState {
     }
 
     pub fn dpi(&self) -> Option<f64> {
-        let v = if self.dpi_text.trim().is_empty() { DPI_OPTIONS.get(self.dpi_choice?).copied()? } else { parse_num(&self.dpi_text)? };
+        let v = if self.dpi_text.trim().is_empty() {
+            DPI_OPTIONS.get(self.dpi_choice?).copied()?
+        } else {
+            numbers::parse_dpi(&self.dpi_text).ok()?.value
+        };
         (100.0..=32000.0).contains(&v).then_some(v)
     }
 
@@ -107,6 +111,33 @@ impl SetupState {
     /// Identity of the inputs that define a test; changing any of them restarts the test.
     pub fn fingerprint(&self) -> String {
         format!("{:?}|{:?}|{:?}|{}|{}", self.profile().map(|p| (p.id, p.name)), self.dpi(), self.sens(), self.custom_yaw, self.custom_name)
+    }
+
+    /// Fill the setup from a saved test (used when resuming).
+    pub fn apply(&mut self, profile: &GameProfile, dpi: f64, sens: f64) {
+        match GAMES.iter().position(|g| g.id == profile.id) {
+            Some(i) => self.game = Some(i),
+            None => {
+                self.game = Some(CUSTOM_IDX);
+                self.custom_name = profile.name.clone();
+                if let zeroin_core::games::SensModel::Linear { yaw } = profile.model {
+                    self.custom_yaw = format!("{yaw}");
+                }
+            }
+        }
+        self.sens_prefilled_for = self.game;
+        match DPI_OPTIONS.iter().position(|d| (*d - dpi).abs() < 0.5) {
+            Some(i) => {
+                self.dpi_choice = Some(i);
+                self.dpi_text.clear();
+            }
+            None => self.dpi_text = format!("{dpi:.0}"),
+        }
+        self.sens_text = trim_float(sens, profile.decimals as usize);
+        if self.accel.is_none() {
+            self.accel = Some(false);
+        }
+        self.sub = SetupStep::Ready;
     }
 
     fn valid(&self, step: SetupStep) -> bool {
@@ -155,6 +186,45 @@ impl ZeroInApp {
         let (enter, esc) = ctx.input(|i| (i.key_pressed(Key::Enter), i.key_pressed(Key::Escape)));
         let pressed = |k: Key| !typing && ctx.input(|i| i.key_pressed(k));
 
+        if self.test.is_none() {
+            if let Some(saved) = self.saved_test.clone() {
+                let mut resume = false;
+                let mut discard = false;
+                widgets::card(ui, |ui| {
+                    ui.set_width(ui.available_width().min(620.0));
+                    ui.label(egui::RichText::new("Unfinished test").font(semibold(15.0)));
+                    widgets::dim(
+                        ui,
+                        format!(
+                            "{} at {} ({:.0} DPI): {} of {} blocks done. Saved progress is kept for 24 hours.",
+                            saved.game.name,
+                            trim_float(saved.start_sens, saved.game.decimals as usize),
+                            saved.dpi,
+                            saved.search.blocks_done(),
+                            saved.search.config().blocks
+                        ),
+                    );
+                    ui.add_space(6.0);
+                    ui.horizontal(|ui| {
+                        if widgets::primary_button(ui, &mut self.motion, "Resume test", true).clicked() {
+                            resume = true;
+                        }
+                        ui.add_space(8.0);
+                        if widgets::secondary_button(ui, &mut self.motion, "Discard", None).clicked() {
+                            discard = true;
+                        }
+                    });
+                });
+                ui.add_space(16.0);
+                if resume {
+                    self.resume_saved_test();
+                    return;
+                }
+                if discard {
+                    self.discard_saved_test();
+                }
+            }
+        }
         widgets::caption(ui, &format!("STEP {} OF 6", sub.index() + 1));
         let mut go_next = false;
 
@@ -266,8 +336,25 @@ impl ZeroInApp {
                     ui.label(egui::RichText::new("Other DPI").color(TEXT_DIM));
                     ui.add(egui::TextEdit::singleline(&mut self.setup.dpi_text).hint_text("e.g. 1000").desired_width(120.0));
                 });
-                if !self.setup.dpi_text.trim().is_empty() && self.setup.dpi().is_none() {
-                    widgets::dim(ui, "DPI must be between 100 and 32000.");
+                if !self.setup.dpi_text.trim().is_empty() {
+                    match numbers::parse_dpi(&self.setup.dpi_text) {
+                        Err(e) => {
+                            widgets::dim(ui, e.message());
+                        }
+                        Ok(p) if !(100.0..=32000.0).contains(&p.value) => {
+                            widgets::dim(ui, "DPI must be between 100 and 32000. Type it as a whole number, for example 1600.");
+                        }
+                        Ok(p) if p.reinterpreted => {
+                            ui.add_space(4.0);
+                            widgets::notice(
+                                ui,
+                                Tone::Info,
+                                &format!("Read as {:.0} DPI", p.value),
+                                "DPI is a whole number, so 1.600, 1,600 and 1 600 all mean 1600.",
+                            );
+                        }
+                        Ok(_) => {}
+                    }
                 }
             }
             SetupStep::Sens => {
@@ -294,18 +381,31 @@ impl ZeroInApp {
                     }
                 }
                 ui.add_space(6.0);
+                let parsed = numbers::parse_decimal(&self.setup.sens_text);
                 match (self.setup.sens(), self.setup.dpi(), p.as_ref()) {
                     (Some(s), Some(dpi), Some(p)) => {
                         let dpc = p.model.deg_per_count(s);
                         let cm = math::cm_per_360(dpi, dpc);
+                        let read_as =
+                            if parsed.is_ok_and(|v| v.reinterpreted) { format!("Read as {} · ", trim_float(s, 6)) } else { String::new() };
                         widgets::dim(
                             ui,
-                            format!("{cm:.1} cm/360 · {:.1} in/360 · eDPI {:.0}", math::inches_per_360(dpi, dpc), math::edpi(dpi, s)),
+                            format!(
+                                "{read_as}{cm:.1} cm/360 · {:.1} in/360 · eDPI {:.0}",
+                                math::inches_per_360(dpi, dpc),
+                                math::edpi(dpi, s)
+                            ),
                         );
+                        let p = p.clone();
+                        self.pixel_skip_notice(ui, &p, dpi, s);
                     }
                     _ => {
                         let (lo, hi) = self.setup.sens_range();
-                        widgets::dim(ui, format!("Enter a number between {} and {}.", trim_float(lo, 4), trim_float(hi, 2)));
+                        let msg = match parsed {
+                            Err(e @ (numbers::NumberError::MixedSeparators | numbers::NumberError::Invalid)) => e.message().to_string(),
+                            _ => format!("Enter a number between {} and {}.", trim_float(lo, 4), trim_float(hi, 2)),
+                        };
+                        widgets::dim(ui, msg);
                     }
                 }
             }
@@ -535,16 +635,17 @@ Raw-input games and ZeroIn's drills ignore this setting.",
                     },
                 );
                 row(ui, "Pointer speed", format!("{}", self.mouse_settings.map(|m| m.pointer_speed).unwrap_or(self.setup.speed)));
+                let blocks = self.settings.test_length.blocks();
+                let plan = zeroin_core::drills::DrillPlan::for_preset(zeroin_core::drills::Preset::for_game(
+                    p.as_ref().map(|p| p.id.as_str()).unwrap_or(""),
+                ));
                 row(
                     ui,
-                    "Rounds",
+                    "Test",
                     format!(
-                        "{} × 3 candidates ({})",
-                        self.settings.rounds,
-                        match self.settings.test_length {
-                            zeroin_core::history::TestLength::Quick => "quick",
-                            _ => "standard",
-                        }
+                        "{blocks} blocks, about {:.0} min · {}",
+                        (blocks as f64 * plan.estimated_block_s() / 60.0).round().max(1.0),
+                        self.settings.mode.label()
                     ),
                 );
             });
@@ -581,6 +682,10 @@ Raw-input games and ZeroIn's drills ignore this setting.",
             } else {
                 widgets::notice(ui, Tone::Ok, &format!("Display: {} Hz", d.current_hz), "Drills render uncapped with no vsync.");
             }
+        }
+        if let Some(prof) = &p {
+            let prof = prof.clone();
+            self.pixel_skip_notice(ui, &prof, dpi, sens);
         }
         if p.as_ref().is_some_and(|p| p.confidence == Confidence::Estimate) {
             widgets::notice(ui, Tone::Info, "This game's constant is an estimate", "Published values disagree. The test still finds the right feel; only cross-game conversions involving this game are approximate.");

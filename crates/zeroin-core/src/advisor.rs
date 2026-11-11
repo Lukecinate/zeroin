@@ -1,104 +1,120 @@
 //! Prompt building and strict validation for the optional local model.
 //!
-//! The model never decides the result. It may (a) suggest the next middle
-//! candidate, which [`crate::search::Search::propose_mid`] clamps, and (b)
-//! write a short plain-language explanation of a result the algorithm already
-//! computed. Every model output passes through this module before use.
+//! The model never decides the result and never proposes test positions. It
+//! may only write a short plain-language explanation of a result the
+//! algorithm already computed. Every model output passes through this module
+//! before use, and text that states numbers the result does not contain, or
+//! talks about confidence, is rejected in favour of the built-in summary.
 
 use crate::search::Observation;
-use serde::Deserialize;
 
 /// Maximum characters kept from a model explanation.
 pub const MAX_EXPLANATION_CHARS: usize = 700;
 
-/// Context passed to prompt builders.
-#[derive(Clone, Debug)]
-pub struct AdviceContext<'a> {
-    /// Game display name.
-    pub game: &'a str,
-    /// Mouse DPI.
-    pub dpi: f64,
-    /// Starting in-game sensitivity.
-    pub start_sens: f64,
-    /// Observations so far.
-    pub observations: &'a [Observation],
-    /// Range the next middle candidate must fall in (multipliers).
-    pub bounds: (f64, f64),
-}
-
 fn obs_table(obs: &[Observation]) -> String {
-    let mut s = String::from("round,multiplier,score,accuracy,speed,control,tracking,overshoot_bias\n");
+    let mut s = String::from("block,multiplier,score,hit_rate,throughput_bits_s,tracking,stop_error_vs_typical\n");
     for o in obs {
         s.push_str(&format!(
-            "{},{:.3},{:.1},{:.2},{:.2},{:.2},{:.2},{:+.2}\n",
+            "{},{:.3},{:.1},{:.2},{:.2},{:.2},{:+.2}\n",
             o.round + 1,
             o.mult,
-            o.score.total,
+            o.score.v2,
             o.score.accuracy,
-            o.score.speed,
-            o.score.control,
-            o.score.tracking,
-            o.score.bias
+            o.score.throughput,
+            o.score.tracking_v2,
+            o.score.bias_corrected
         ));
     }
     s
 }
 
-/// System prompt shared by both tasks.
+/// System prompt.
 pub const SYSTEM_PROMPT: &str = "You are a careful assistant inside a mouse-sensitivity calibration tool for PC shooters. \
-You analyse aim-test scores. Be concise and factual. Never invent numbers that are not in the data.";
-
-/// Prompt asking for the next middle candidate as JSON.
-pub fn next_candidate_prompt(ctx: &AdviceContext<'_>) -> String {
-    format!(
-        "/no_think\nGame: {game}. Mouse: {dpi:.0} DPI. Starting sensitivity: {sens}.\n\
-Candidates are multipliers of the starting sensitivity. Higher score is better. \
-Positive overshoot_bias means the player overshoots (too fast); negative means stopping short (too slow).\n\n{table}\n\
-Pick the multiplier most likely to score highest next, between {lo:.3} and {hi:.3}. \
-Reply with only JSON: {{\"next_multiplier\": <number>, \"reason\": \"<one short sentence>\"}}",
-        game = ctx.game,
-        dpi = ctx.dpi,
-        sens = ctx.start_sens,
-        table = obs_table(ctx.observations),
-        lo = ctx.bounds.0,
-        hi = ctx.bounds.1,
-    )
-}
+You explain aim-test results. Be concise and factual. Never invent numbers that are not in the data.";
 
 /// Facts about a finished result, used for the explanation prompt and the built-in fallback.
 #[derive(Clone, Debug)]
 pub struct ResultFacts<'a> {
     /// Game display name.
     pub game: &'a str,
+    /// True when the advice is to keep the current sens.
+    pub keep: bool,
+    /// Starting sensitivity, formatted as shown to the player.
+    pub start_text: String,
+    /// Recommended sensitivity, formatted as shown.
+    pub recommended_text: String,
     /// Starting sensitivity.
     pub start_sens: f64,
     /// Recommended sensitivity (already rounded).
     pub recommended_sens: f64,
+    /// Range of about-equally-good sensitivities, formatted as shown.
+    pub band_text: (String, String),
+    /// Predicted gain of moving, in score points.
+    pub gain_pts: f64,
     /// cm/360 at the recommendation.
     pub cm360: f64,
     /// Starting cm/360.
     pub start_cm360: f64,
-    /// Confidence 0–1.
-    pub confidence: f64,
-    /// All observations.
+    /// All valid observations.
     pub observations: &'a [Observation],
 }
 
 /// Prompt asking for a plain-language explanation.
 pub fn explanation_prompt(f: &ResultFacts<'_>) -> String {
+    let verdict = if f.keep {
+        format!("keep the current sensitivity {} ({:.1} cm/360)", f.start_text, f.start_cm360)
+    } else {
+        format!("change from {} ({:.1} cm/360) to {} ({:.1} cm/360)", f.start_text, f.start_cm360, f.recommended_text, f.cm360)
+    };
     format!(
-        "/no_think\nGame: {game}. The calibration algorithm already chose the result: sensitivity {rec} ({cm:.1} cm/360), \
-starting from {start} ({scm:.1} cm/360). Confidence {conf:.0}%.\n\nScores per tested multiplier:\n{table}\n\
-In at most 80 words of plain English, explain to the player why this sensitivity fits them, mentioning accuracy, speed, \
-overshoot or tracking where the data supports it. Do not suggest a different number. Plain text only, no lists, no markdown.",
+        "/no_think\nGame: {game}. The calibration algorithm already decided: {verdict}. \
+Settings from {lo} to {hi} scored about equally well. Multipliers are relative to the starting sensitivity; \
+score is 0-100, higher is better; stop_error_vs_typical above 0 means flying past targets more than most people, below 0 stopping short.\n\n{table}\n\
+In at most 80 words of plain English, explain this result to the player, mentioning hit rate, speed, tracking or overshoot only where the data supports it. \
+Use only numbers that appear above. Do not suggest a different number and do not talk about confidence or probability. Plain text only, no lists, no markdown.",
         game = f.game,
-        rec = f.recommended_sens,
-        cm = f.cm360,
-        start = f.start_sens,
-        scm = f.start_cm360,
-        conf = f.confidence * 100.0,
+        lo = f.band_text.0,
+        hi = f.band_text.1,
         table = obs_table(f.observations),
     )
+}
+
+/// Check a model explanation against the facts. Rejects text that mentions
+/// confidence, or contains a decimal number that is not one of the result's
+/// own figures (so the model cannot state a different sensitivity).
+pub fn explanation_is_consistent(text: &str, f: &ResultFacts<'_>) -> bool {
+    let lower = text.to_lowercase();
+    if lower.contains("confiden") || lower.contains("probab") {
+        return false;
+    }
+    let mut allowed: Vec<String> = vec![f.start_text.clone(), f.recommended_text.clone(), f.band_text.0.clone(), f.band_text.1.clone()];
+    for v in [f.cm360, f.start_cm360] {
+        allowed.push(format!("{v:.1}"));
+        allowed.push(format!("{:.1}", half(v)));
+        allowed.push(format!("{v:.0}"));
+    }
+    for o in f.observations {
+        allowed.push(format!("{:.1}", o.score.v2));
+        allowed.push(format!("{:.2}", o.score.throughput));
+        allowed.push(format!("{:.3}", o.mult));
+    }
+    let norm = |t: &str| t.replace(',', ".").trim_end_matches('.').to_string();
+    let allowed: Vec<String> = allowed.iter().map(|a| norm(a)).collect();
+    let mut num = String::new();
+    let chars: Vec<char> = text.chars().chain(std::iter::once(' ')).collect();
+    for (i, c) in chars.iter().enumerate() {
+        let joins = (*c == '.' || *c == ',') && !num.is_empty() && chars.get(i + 1).is_some_and(|n| n.is_ascii_digit());
+        if c.is_ascii_digit() || joins {
+            num.push(*c);
+        } else if !num.is_empty() {
+            let n = norm(&num);
+            if n.contains('.') && !allowed.contains(&n) {
+                return false;
+            }
+            num.clear();
+        }
+    }
+    true
 }
 
 /// Remove `<think>…</think>` blocks (and an unterminated trailing one).
@@ -121,35 +137,6 @@ pub fn strip_thinking(raw: &str) -> String {
         }
     }
     out
-}
-
-#[derive(Deserialize)]
-struct RawAdvice {
-    next_multiplier: f64,
-    #[serde(default)]
-    reason: String,
-}
-
-/// Validated next-candidate advice.
-#[derive(Clone, Debug, PartialEq)]
-pub struct Advice {
-    /// Proposed multiplier, already clamped to the given bounds.
-    pub next_mult: f64,
-    /// Sanitised one-line reason.
-    pub reason: String,
-}
-
-/// Parse the model's JSON reply. Returns `None` for anything malformed or non-finite.
-pub fn parse_advice(raw: &str, bounds: (f64, f64)) -> Option<Advice> {
-    let text = strip_thinking(raw);
-    let start = text.find('{')?;
-    let end = text[start..].find('}')? + start;
-    let parsed: RawAdvice = serde_json::from_str(&text[start..=end]).ok()?;
-    if !parsed.next_multiplier.is_finite() || parsed.next_multiplier <= 0.0 {
-        return None;
-    }
-    let (lo, hi) = bounds;
-    Some(Advice { next_mult: parsed.next_multiplier.clamp(lo, hi), reason: sanitize_explanation(&parsed.reason, 200) })
 }
 
 /// Clean model text for display: drop thinking, markdown symbols, links and
@@ -177,36 +164,47 @@ pub fn sanitize_explanation(raw: &str, max_chars: usize) -> String {
     }
 }
 
+/// cm/360 is shown to the nearest half centimetre: finer digits suggest a precision the test does not have.
+pub fn half(cm: f64) -> f64 {
+    (cm * 2.0).round() / 2.0
+}
+
 /// Deterministic explanation used when the model is unavailable or its output is rejected.
 pub fn fallback_explanation(f: &ResultFacts<'_>) -> String {
-    let best = f.observations.iter().max_by(|a, b| a.score.total.partial_cmp(&b.score.total).unwrap_or(std::cmp::Ordering::Equal));
     let mut s = String::new();
-    let change = f.recommended_sens / f.start_sens - 1.0;
-    if change.abs() < 0.03 {
+    if f.keep {
         s.push_str(&format!(
-            "Your current {} sensitivity already scored at the top of the tested range, so it stays about the same. ",
-            f.game
+            "Keep your current {} sensitivity. Moving would not clearly improve your scores: settings from {} to {} performed about the same for you. ",
+            f.game, f.band_text.0, f.band_text.1
         ));
-    } else if change > 0.0 {
-        s.push_str(&format!("You scored best about {:.0}% faster than your current setting. ", change * 100.0));
     } else {
-        s.push_str(&format!("You scored best about {:.0}% slower than your current setting. ", -change * 100.0));
-    }
-    if let Some(b) = best {
-        if b.score.bias > 0.15 {
-            s.push_str("Even at this setting you tended to overshoot a little; if it feels fast in game, go slightly lower. ");
-        } else if b.score.bias < -0.15 {
-            s.push_str("At this setting you still stopped short of some targets; if it feels slow in game, go slightly higher. ");
-        }
+        let change = f.recommended_sens / f.start_sens - 1.0;
+        let dir = if change > 0.0 { "faster" } else { "slower" };
         s.push_str(&format!(
-            "At the best setting you hit {:.0}% of targets and stayed on the tracking target {:.0}% of the time. ",
-            b.score.accuracy * 100.0,
-            b.score.tracking * 100.0
+            "You scored better at a {dir} setting: {} instead of {}. Settings from {} to {} performed about equally well, so anything in that range is a sound choice. ",
+            f.recommended_text, f.start_text, f.band_text.0, f.band_text.1
         ));
     }
-    s.push_str(&format!("That is {:.1} cm of mouse travel per full turn (was {:.1} cm).", f.cm360, f.start_cm360));
-    if f.confidence < 0.5 {
-        s.push_str(" Scores were close together, so a second run is worth doing.");
+    // Aim-bias advice uses the baseline-corrected stop error, and only when
+    // it is consistent across most blocks.
+    let n = f.observations.len();
+    if n > 0 {
+        let over = f.observations.iter().filter(|o| o.score.bias_corrected > 0.08).count();
+        let under = f.observations.iter().filter(|o| o.score.bias_corrected < -0.08).count();
+        if over * 3 >= n * 2 {
+            s.push_str(
+                "You tended to fly past targets more than most people do; if it feels fast in game, pick the lower end of the range. ",
+            );
+        } else if under * 3 >= n * 2 {
+            s.push_str(
+                "You tended to stop short of targets more than most people do; if it feels slow in game, pick the upper end of the range. ",
+            );
+        }
+    }
+    if f.keep {
+        s.push_str(&format!("That is about {:.1} cm of mouse travel per full turn.", half(f.start_cm360)));
+    } else {
+        s.push_str(&format!("That is about {:.1} cm of mouse travel per full turn (was {:.1} cm).", half(f.cm360), half(f.start_cm360)));
     }
     s
 }
@@ -216,25 +214,20 @@ mod tests {
     use super::*;
     use crate::scoring::Score;
 
-    #[test]
-    fn parses_clean_json() {
-        let a = parse_advice("{\"next_multiplier\": 1.12, \"reason\": \"Peak is between mid and high.\"}", (0.8, 1.3)).unwrap();
-        assert_eq!(a.next_mult, 1.12);
-        assert_eq!(a.reason, "Peak is between mid and high.");
-    }
-
-    #[test]
-    fn strips_thinking_and_clamps() {
-        let raw = "<think>lots of {\"next_multiplier\": 9}</think> Sure! {\"next_multiplier\": 5.0}";
-        assert_eq!(parse_advice(raw, (0.8, 1.3)).unwrap().next_mult, 1.3);
-    }
-
-    #[test]
-    fn rejects_garbage() {
-        assert!(parse_advice("no json here", (0.8, 1.2)).is_none());
-        assert!(parse_advice("{\"next_multiplier\": \"fast\"}", (0.8, 1.2)).is_none());
-        assert!(parse_advice("{\"next_multiplier\": -3}", (0.8, 1.2)).is_none());
-        assert!(parse_advice("<think>unterminated {\"next_multiplier\": 1.0}", (0.8, 1.2)).is_none());
+    fn facts(obs: &[Observation], keep: bool) -> ResultFacts<'_> {
+        ResultFacts {
+            game: "Valorant",
+            keep,
+            start_text: "0.4".into(),
+            recommended_text: if keep { "0.4".into() } else { "0.48".into() },
+            start_sens: 0.4,
+            recommended_sens: if keep { 0.4 } else { 0.48 },
+            band_text: ("0.42".into(), "0.53".into()),
+            gain_pts: 2.5,
+            cm360: if keep { 36.0 } else { 30.0 },
+            start_cm360: 36.0,
+            observations: obs,
+        }
     }
 
     #[test]
@@ -246,21 +239,44 @@ mod tests {
     }
 
     #[test]
-    fn fallback_mentions_direction() {
-        let obs = [Observation { round: 0, mult: 1.2, score: Score { total: 70.0, accuracy: 0.8, tracking: 0.6, ..Default::default() } }];
-        let f = ResultFacts {
-            game: "Valorant",
-            start_sens: 0.4,
-            recommended_sens: 0.48,
-            cm360: 30.0,
-            start_cm360: 36.0,
-            confidence: 0.8,
-            observations: &obs,
-        };
+    fn strips_thinking() {
+        assert_eq!(strip_thinking("<think>x</think>Hi"), "Hi");
+        assert_eq!(strip_thinking("Hi<think>unterminated"), "Hi");
+    }
+
+    #[test]
+    fn fallback_mentions_direction_and_range() {
+        let obs = [Observation { round: 0, mult: 1.2, score: Score { v2: 70.0, accuracy: 0.8, ..Default::default() } }];
+        let f = facts(&obs, false);
         let t = fallback_explanation(&f);
-        assert!(t.contains("20% faster"), "{t}");
+        assert!(t.contains("faster") && t.contains("0.48") && t.contains("0.42 to 0.53"), "{t}");
         assert!(t.contains("30.0 cm"));
+        assert!(!t.to_lowercase().contains("confiden"));
         let p = explanation_prompt(&f);
-        assert!(p.contains("0.48") && p.contains("/no_think"));
+        assert!(p.contains("0.48") && p.contains("/no_think") && !p.contains("Confidence"));
+        let k = fallback_explanation(&facts(&obs, true));
+        assert!(k.starts_with("Keep your current Valorant sensitivity"), "{k}");
+    }
+
+    #[test]
+    fn bias_advice_uses_the_corrected_value() {
+        // Raw undershoot of 11 % is typical, so no advice.
+        let typical = Score { v2: 60.0, bias: -0.11, bias_corrected: 0.0, ..Default::default() };
+        let obs: Vec<Observation> = (0..6).map(|i| Observation { round: i, mult: 1.0, score: typical }).collect();
+        let t = fallback_explanation(&facts(&obs, true));
+        assert!(!t.contains("stop short") && !t.contains("fly past"), "{t}");
+        let past = Score { bias_corrected: 0.15, ..typical };
+        let obs: Vec<Observation> = (0..6).map(|i| Observation { round: i, mult: 1.0, score: past }).collect();
+        assert!(fallback_explanation(&facts(&obs, true)).contains("fly past"));
+    }
+
+    #[test]
+    fn rejects_inconsistent_model_text() {
+        let obs = [Observation { round: 0, mult: 1.2, score: Score { v2: 70.0, ..Default::default() } }];
+        let f = facts(&obs, false);
+        assert!(explanation_is_consistent("Your best setting is 0.48, about 30 cm per turn. You hit 8 of 11 targets.", &f));
+        assert!(explanation_is_consistent("Anything from 0,42 to 0,53 felt the same.", &f));
+        assert!(!explanation_is_consistent("Try 0.55 instead.", &f));
+        assert!(!explanation_is_consistent("We are 90% confident in 0.48.", &f));
     }
 }

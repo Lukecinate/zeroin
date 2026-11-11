@@ -7,6 +7,7 @@ use crate::platform::{self, InputEvent, InputKind};
 use crate::theme::*;
 use crate::widgets::{self, Tone};
 use eframe::egui::{self, Align2, Pos2, Rect, Stroke, StrokeKind};
+use zeroin_core::bayes::Mode;
 use zeroin_core::history::TestLength;
 
 /// Raw keyboard check for Hall-effect / rapid-trigger boards.
@@ -50,7 +51,7 @@ impl ZeroInApp {
         widgets::caption(ui, "TEST");
         widgets::card(ui, |ui| {
             ui.set_width(w);
-            widgets::setting_row(ui, "Test length", "Quick ≈ 15 s per candidate, Standard ≈ 25 s.", |ui| {
+            widgets::setting_row(ui, "Test length", "Quick: 6 blocks, about 2.5 min. Standard: 9 blocks, about 4 min.", |ui| {
                 let labels = vec!["Quick".to_string(), "Standard".to_string()];
                 let sel = match self.settings.test_length {
                     TestLength::Quick => 0,
@@ -61,11 +62,12 @@ impl ZeroInApp {
                     self.save_settings();
                 }
             });
-            widgets::setting_row(ui, "Rounds", "More rounds narrow the result further.", |ui| {
-                let labels = vec!["3".to_string(), "4".to_string(), "5".to_string()];
-                let sel = (self.settings.rounds.clamp(3, 5) - 3) as usize;
-                if let Some(i) = widgets::chip_row(ui, &mut self.motion, crate::motion::id("round_chips"), &labels, Some(sel)) {
-                    self.settings.rounds = 3 + i as u32;
+            widgets::setting_row(ui, "When to suggest a change", "Predicted gain needed: 2, 1 or 0.5 points.", |ui| {
+                const MODES: [Mode; 3] = [Mode::Conservative, Mode::Balanced, Mode::Explorer];
+                let labels: Vec<String> = MODES.iter().map(|m| m.label().to_string()).collect();
+                let sel = MODES.iter().position(|m| *m == self.settings.mode);
+                if let Some(i) = widgets::chip_row(ui, &mut self.motion, crate::motion::id("mode_chips"), &labels, sel) {
+                    self.settings.mode = MODES[i];
                     self.save_settings();
                 }
             });
@@ -78,7 +80,7 @@ impl ZeroInApp {
         widgets::card(ui, |ui| {
             ui.set_width(w);
             let mut on = self.settings.ai_enabled;
-            widgets::setting_row(ui, "Use the local AI model", "Suggests the next candidate (always clamped by the algorithm) and writes the result explanation. Runs on your CPU; nothing is sent anywhere.", |ui| {
+            widgets::setting_row(ui, "Use the local AI model", "Writes a plain-language explanation of each result. It never picks test settings or changes a number. Runs on your CPU; nothing is sent anywhere.", |ui| {
                 if widgets::toggle(ui, &mut self.motion, crate::motion::id("ai_toggle"), &mut on, true).changed() {}
             });
             if on != self.settings.ai_enabled {
