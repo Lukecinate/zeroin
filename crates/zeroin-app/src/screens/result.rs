@@ -101,6 +101,10 @@ impl ZeroInApp {
                 .mouse_settings
                 .map(|m| WindowsMouse { pointer_speed: m.pointer_speed, enhance_pointer_precision: m.enhance_pointer_precision }),
             polling_hz: self.polling.last.map(|p| p.rate_hz),
+            gear: {
+                let g = self.settings.gear.sanitized();
+                (!g.is_empty()).then_some(g)
+            },
             app_version: env!("CARGO_PKG_VERSION").to_string(),
         };
         let f = facts(&session, &owned);
@@ -222,6 +226,31 @@ impl ZeroInApp {
             );
             band_chart(ui, &s, lo, hi, ui.available_width().min(620.0));
             widgets::dim(ui, "Anything in this range performed within about 2 points of the best. Pick what feels right in game.");
+        }
+        if let Some(sum) = s.gear.as_ref().and_then(|g| g.summary()) {
+            ui.add_space(6.0);
+            widgets::dim(ui, format!("{sum}. Self-reported; it does not change the result."));
+        }
+        if let Some(adv) = s.gear.as_ref().and_then(|g| zeroin_core::gear::advice(g, &s.game.id)) {
+            ui.add_space(6.0);
+            let (k0, k1) = adv.try_slower;
+            let slower = |k: f64| sens_for_mult(&s.game, s.recommended_sens, 1.0 / k);
+            let body = format!(
+                "{} For this result that is about {:.0}–{:.0} cm/360 (sens {}–{}).",
+                adv.text,
+                s.cm360 * k0,
+                s.cm360 * k1,
+                trim_float(slower(k1), dec),
+                trim_float(slower(k0), dec)
+            );
+            widgets::notice(ui, Tone::Info, "About your mousepad and feet", &body);
+            egui::CollapsingHeader::new(egui::RichText::new("Why we say this").font(semibold(13.0)).color(TEXT_DIM))
+                .id_salt("gear_why")
+                .show(ui, |ui| {
+                    for w in adv.why {
+                        widgets::dim(ui, format!("• {w}"));
+                    }
+                });
         }
         ui.add_space(14.0);
 

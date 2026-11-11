@@ -70,3 +70,68 @@ pub fn release_cursor() {}
 pub fn local_offset_secs(_unix: u64) -> Option<i64> {
     None
 }
+
+// ---------------------------------------------------------------------------
+// Polling check (development mock only)
+
+/// Off Windows there is no raw input. For UI development,
+/// `ZEROIN_DEV_POLL=<hz>[:<jitter>]` (for example `8000:0.02` or `2500:0.45`)
+/// generates a synthetic report stream; the screen labels it as mock data.
+pub struct PollCheck {
+    started_ns: u64,
+    hz: f64,
+    jitter: f64,
+}
+
+fn dev_poll() -> Option<(f64, f64)> {
+    let v = std::env::var("ZEROIN_DEV_POLL").ok()?;
+    let (h, j) = v.split_once(':').unwrap_or((v.as_str(), "0.03"));
+    let hz: f64 = h.trim().parse().ok()?;
+    let jitter: f64 = j.trim().parse().ok()?;
+    (hz > 0.0 && hz <= 16_000.0).then_some((hz, jitter.clamp(0.0, 0.95)))
+}
+
+impl PollCheck {
+    pub fn start() -> Result<Self, String> {
+        match dev_poll() {
+            Some((hz, jitter)) => Ok(PollCheck { started_ns: super::now_ns(), hz, jitter }),
+            None => Err("Not measurable here: the polling check needs Windows Raw Input.".into()),
+        }
+    }
+
+    pub fn count(&self) -> u64 {
+        (super::now_ns().saturating_sub(self.started_ns) as f64 / 1e9 * self.hz) as u64
+    }
+
+    pub fn finish(self) -> Result<Vec<super::CapReport>, String> {
+        let secs = (super::now_ns().saturating_sub(self.started_ns) as f64 / 1e9).min(30.0);
+        let n = (secs * self.hz) as u64;
+        let t = 1e9 / self.hz;
+        let mut x: u64 = 0x9E37_79B9_7F4A_7C15;
+        let mut out: Vec<super::CapReport> = (0..n)
+            .map(|i| {
+                x ^= x << 13;
+                x ^= x >> 7;
+                x ^= x << 17;
+                let u = (x % 20001) as f64 / 10000.0 - 1.0;
+                let ts = (i as f64 * t + self.jitter * t * u).max(0.0) as u64 + self.started_ns;
+                super::CapReport { t_ns: ts, device: 1, dx: 6, dy: 3, batch: 1 }
+            })
+            .collect();
+        out.sort_by_key(|r| r.t_ns);
+        Ok(out)
+    }
+}
+
+pub fn device_identity(_device: u64) -> Option<super::DeviceIdentity> {
+    dev_poll().map(|_| super::DeviceIdentity {
+        path: "mock".into(),
+        product: Some("Development mock (no device)".into()),
+        manufacturer: None,
+        mock: true,
+    })
+}
+
+pub(crate) fn open_url_impl(url: &str) -> bool {
+    std::process::Command::new("xdg-open").arg(url).spawn().is_ok()
+}

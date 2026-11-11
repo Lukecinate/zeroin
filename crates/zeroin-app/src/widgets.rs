@@ -178,6 +178,11 @@ pub fn option_card_w(
 
 /// Row of chips with a highlight that springs between choices.
 pub fn chip_row(ui: &mut Ui, motion: &mut Motion, id: Id, labels: &[String], selected: Option<usize>) -> Option<usize> {
+    chip_row_from(ui, motion, id, labels, selected, 1)
+}
+
+/// [`chip_row`] with key numbers starting at `first` (for a second row on the same screen).
+pub fn chip_row_from(ui: &mut Ui, motion: &mut Motion, id: Id, labels: &[String], selected: Option<usize>, first: usize) -> Option<usize> {
     let mut clicked = None;
     let mut rects = Vec::new();
     ui.horizontal(|ui| {
@@ -215,7 +220,7 @@ pub fn chip_row(ui: &mut Ui, motion: &mut Motion, id: Id, labels: &[String], sel
         ui.painter().text(
             Pos2::new(rect.left() + 12.0, rect.center().y),
             Align2::LEFT_CENTER,
-            format!("{}", i + 1),
+            format!("{}", (i + first) % 10),
             regular(11.0),
             lerp_color(TEXT_FAINT, INK, t),
         );

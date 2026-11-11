@@ -40,24 +40,35 @@ impl Step {
 pub struct PollingMeter {
     device: Option<u64>,
     stamps: Vec<u64>,
+    motion: Vec<(u64, i32, i32)>,
     pub last: Option<PollingStats>,
+    /// Jitter while moving fast, the pre-test value for the block rule.
+    pub baseline: Option<polling::Jitter>,
 }
 
 impl PollingMeter {
     pub fn feed(&mut self, ev: &InputEvent) {
-        if let platform::InputKind::Motion { .. } = ev.kind {
+        if let platform::InputKind::Motion { dx, dy } = ev.kind {
             if self.device != Some(ev.device) {
                 // Follow whichever mouse is moving.
                 self.device = Some(ev.device);
                 self.stamps.clear();
+                self.motion.clear();
             }
             self.stamps.push(ev.t_us);
+            self.motion.push((ev.t_us, dx, dy));
             if self.stamps.len() > 4000 {
                 self.stamps.drain(..2000);
+            }
+            if self.motion.len() > 8000 {
+                self.motion.drain(..4000);
             }
             if self.stamps.len().is_multiple_of(64) {
                 if let Some(s) = polling::analyze(&self.stamps) {
                     self.last = Some(s);
+                }
+                if let Some(j) = polling::jitter(&self.motion) {
+                    self.baseline = Some(j);
                 }
             }
         }
@@ -79,6 +90,7 @@ pub struct ZeroInApp {
     pub raw: RawInput,
     pub events: Vec<InputEvent>,
     pub polling: PollingMeter,
+    pub mouse_check: crate::screens::mousecheck::MouseCheck,
     pub mouse_settings: Option<MouseSettings>,
     pub display: Option<DisplayInfo>,
     pub llm: Llm,
@@ -137,6 +149,7 @@ impl ZeroInApp {
             raw: RawInput::start(),
             events: Vec::new(),
             polling: PollingMeter::default(),
+            mouse_check: Default::default(),
             mouse_settings: platform::mouse_settings(),
             display: platform::display_info(),
             llm,
@@ -368,7 +381,13 @@ impl ZeroInApp {
                 }
             }
             Section::History => self.history_screen(&mut child),
-            Section::Settings => self.settings_screen(&mut child),
+            Section::Settings => {
+                if self.mouse_check.open {
+                    self.mouse_check_screen(&mut child)
+                } else {
+                    self.settings_screen(&mut child)
+                }
+            }
         }
     }
 

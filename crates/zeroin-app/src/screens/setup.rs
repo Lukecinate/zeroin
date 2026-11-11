@@ -18,11 +18,22 @@ pub enum SetupStep {
     Sens,
     Accel,
     Speed,
+    Pad,
+    Feet,
     Ready,
 }
 
 impl SetupStep {
-    const ALL: [SetupStep; 6] = [SetupStep::Game, SetupStep::Dpi, SetupStep::Sens, SetupStep::Accel, SetupStep::Speed, SetupStep::Ready];
+    const ALL: [SetupStep; 8] = [
+        SetupStep::Game,
+        SetupStep::Dpi,
+        SetupStep::Sens,
+        SetupStep::Accel,
+        SetupStep::Speed,
+        SetupStep::Pad,
+        SetupStep::Feet,
+        SetupStep::Ready,
+    ];
     fn index(self) -> usize {
         Self::ALL.iter().position(|s| *s == self).unwrap_or(0)
     }
@@ -46,6 +57,8 @@ pub struct SetupState {
     pub accel: Option<bool>,
     pub speed: u32,
     pub speed_touched: bool,
+    /// Self-reported gear (optional; never used in the result).
+    pub gear: zeroin_core::gear::Gear,
 }
 
 /// Index used for "Other / custom yaw" in `game`.
@@ -72,6 +85,7 @@ impl SetupState {
             accel: None,
             speed: 10,
             speed_touched: false,
+            gear: s.gear.sanitized(),
         }
     }
 
@@ -146,7 +160,7 @@ impl SetupState {
             SetupStep::Dpi => self.dpi().is_some(),
             SetupStep::Sens => self.sens().is_some(),
             SetupStep::Accel => self.accel.is_some(),
-            SetupStep::Speed | SetupStep::Ready => true,
+            SetupStep::Speed | SetupStep::Pad | SetupStep::Feet | SetupStep::Ready => true,
         }
     }
 
@@ -169,7 +183,7 @@ pub fn trim_float(v: f64, decimals: usize) -> String {
     }
 }
 
-fn key_for(i: usize) -> Option<Key> {
+pub fn key_for(i: usize) -> Option<Key> {
     const KEYS: [Key; 10] = [Key::Num1, Key::Num2, Key::Num3, Key::Num4, Key::Num5, Key::Num6, Key::Num7, Key::Num8, Key::Num9, Key::Num0];
     KEYS.get(i).copied()
 }
@@ -225,7 +239,7 @@ impl ZeroInApp {
                 }
             }
         }
-        widgets::caption(ui, &format!("STEP {} OF 6", sub.index() + 1));
+        widgets::caption(ui, &format!("STEP {} OF {}", sub.index() + 1, SetupStep::ALL.len()));
         let mut go_next = false;
 
         match sub {
@@ -484,6 +498,90 @@ impl ZeroInApp {
                 ui.add_space(6.0);
                 self.speed_notices(ui);
             }
+            SetupStep::Pad => {
+                use zeroin_core::gear::{PadSpeed, PadSurface, MAX_PAD_NAME};
+                widgets::heading(
+                    ui,
+                    "Which mousepad do you use? (optional)",
+                    "Kept with your results so you can compare pads in History. The result is computed from your aim only, never from this. Press Enter to skip.",
+                );
+                widgets::caption(ui, "SURFACE");
+                let labels: Vec<String> = PadSurface::ALL.iter().map(|s| s.label().to_string()).collect();
+                let sel = self.setup.gear.pad_surface.and_then(|v| PadSurface::ALL.iter().position(|x| *x == v));
+                let mut pick = widgets::chip_row(ui, &mut self.motion, crate::motion::id("pad_surface"), &labels, sel);
+                for i in 0..PadSurface::ALL.len() {
+                    if key_for(i).is_some_and(pressed) {
+                        pick = Some(i);
+                    }
+                }
+                if let Some(i) = pick {
+                    let v = PadSurface::ALL[i];
+                    self.setup.gear.pad_surface = if self.setup.gear.pad_surface == Some(v) { None } else { Some(v) };
+                }
+                ui.add_space(8.0);
+                widgets::caption(ui, "SPEED");
+                let first = PadSurface::ALL.len();
+                let labels: Vec<String> = PadSpeed::ALL.iter().map(|s| s.label().to_string()).collect();
+                let sel = self.setup.gear.pad_speed.and_then(|v| PadSpeed::ALL.iter().position(|x| *x == v));
+                let mut pick = widgets::chip_row_from(ui, &mut self.motion, crate::motion::id("pad_speed"), &labels, sel, first + 1);
+                for i in 0..PadSpeed::ALL.len() {
+                    if key_for(first + i).is_some_and(pressed) {
+                        pick = Some(i);
+                    }
+                }
+                if let Some(i) = pick {
+                    let v = PadSpeed::ALL[i];
+                    self.setup.gear.pad_speed = if self.setup.gear.pad_speed == Some(v) { None } else { Some(v) };
+                }
+                ui.add_space(8.0);
+                widgets::caption(ui, "BRAND AND MODEL (OPTIONAL)");
+                let resp = ui.add(
+                    egui::TextEdit::singleline(&mut self.setup.gear.pad_name)
+                        .char_limit(MAX_PAD_NAME)
+                        .hint_text("For example the name printed on the pad")
+                        .desired_width(360.0),
+                );
+                if resp.lost_focus() {
+                    self.setup.gear.pad_name = zeroin_core::gear::sanitize_text(&self.setup.gear.pad_name, MAX_PAD_NAME);
+                }
+                if let Some(url) = zeroin_core::gear::search_url(&self.setup.gear.pad_name) {
+                    ui.add_space(6.0);
+                    if self.settings.gear_lookup {
+                        if widgets::secondary_button(ui, &mut self.motion, "Search specs in your browser", None).clicked()
+                            && !crate::platform::open_https(&url)
+                        {
+                            self.toast("Could not open the browser.");
+                        }
+                        widgets::dim(
+                            ui,
+                            "Opens a web search for the name above in your browser. Pick surface and speed here from what you find.",
+                        );
+                    } else {
+                        widgets::dim(ui, "Turn on Gear lookup in Settings to search for this pad's specs in your browser.");
+                    }
+                }
+            }
+            SetupStep::Feet => {
+                use zeroin_core::gear::Feet;
+                widgets::heading(
+                    ui,
+                    "Which mouse feet do you use? (optional)",
+                    "Kept with your results for context only. Press Enter to skip.",
+                );
+                let labels: Vec<String> = Feet::ALL.iter().map(|s| s.label().to_string()).collect();
+                let sel = self.setup.gear.feet.and_then(|v| Feet::ALL.iter().position(|x| *x == v));
+                let mut pick = widgets::chip_row(ui, &mut self.motion, crate::motion::id("feet"), &labels, sel);
+                for i in 0..Feet::ALL.len() {
+                    if key_for(i).is_some_and(pressed) {
+                        pick = Some(i);
+                    }
+                }
+                if let Some(i) = pick {
+                    let v = Feet::ALL[i];
+                    self.setup.gear.feet = if self.setup.gear.feet == Some(v) { None } else { Some(v) };
+                }
+                widgets::dim(ui, "Click a selected option again to clear it.");
+            }
             SetupStep::Ready => {
                 self.ready_view(ui);
             }
@@ -495,7 +593,9 @@ impl ZeroInApp {
             SetupStep::Dpi => "Next: your current sensitivity",
             SetupStep::Sens => "Next: pointer precision",
             SetupStep::Accel => "Next: pointer speed",
-            SetupStep::Speed => "Next: review and check devices",
+            SetupStep::Speed => "Next: mousepad (optional)",
+            SetupStep::Pad => "Next: mouse feet (optional)",
+            SetupStep::Feet => "Next: review and check devices",
             SetupStep::Ready => "Start test",
         };
         let valid = self.setup.valid(sub);
@@ -515,7 +615,7 @@ impl ZeroInApp {
         if sub != SetupStep::Game {
             hints.push(("Esc", "back"));
         }
-        if matches!(sub, SetupStep::Game | SetupStep::Dpi | SetupStep::Accel) {
+        if matches!(sub, SetupStep::Game | SetupStep::Dpi | SetupStep::Accel | SetupStep::Pad | SetupStep::Feet) {
             hints.push(("1–9", "choose"));
         }
         widgets::key_hint(ui, &hints);
@@ -532,6 +632,11 @@ impl ZeroInApp {
             match sub.next() {
                 Some(n) => self.setup.sub = n,
                 None => self.begin_test(),
+            }
+            if sub == SetupStep::Pad || sub == SetupStep::Feet {
+                self.setup.gear = self.setup.gear.sanitized();
+                self.settings.gear = self.setup.gear.clone();
+                self.save_settings();
             }
             if sub == SetupStep::Game || sub == SetupStep::Dpi {
                 self.settings.last_game = self.setup.profile().map(|p| p.id).filter(|id| id != "custom");

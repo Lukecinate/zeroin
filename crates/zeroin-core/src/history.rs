@@ -5,6 +5,7 @@
 use crate::bayes::{BayesSearch, Mode};
 use crate::drills::{DrillPlan, Preset};
 use crate::games::GameProfile;
+use crate::gear::Gear;
 use crate::search::{Observation, RecommendationMethod};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::io;
@@ -81,6 +82,9 @@ pub struct Session {
     pub windows_mouse: Option<WindowsMouse>,
     /// Measured polling rate, if measured.
     pub polling_hz: Option<f64>,
+    /// 0.2.1: self-reported mousepad and feet. Context only; never used in the result.
+    #[serde(default)]
+    pub gear: Option<Gear>,
     /// App version that produced the session.
     pub app_version: String,
 }
@@ -116,6 +120,51 @@ impl History {
         self.sessions.retain(|s| s.id != id);
         n != self.sessions.len()
     }
+}
+
+/// Results grouped by self-reported mousepad, for comparison in History.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PadSummary {
+    /// Mousepad label ([`Gear::pad_label`]); `None` groups results without one.
+    pub label: Option<String>,
+    /// Number of results.
+    pub count: usize,
+    /// Median recommended cm/360.
+    pub median_cm360: f64,
+    /// Lowest and highest recommended cm/360.
+    pub min_cm360: f64,
+    /// Highest recommended cm/360.
+    pub max_cm360: f64,
+}
+
+/// Mousepad label of a session, if any was entered.
+pub fn pad_label(s: &Session) -> Option<String> {
+    s.gear.as_ref().and_then(|g| g.pad_label())
+}
+
+/// Group sessions by mousepad label (case-insensitive), most results first.
+/// The "no mousepad entered" group, if any, comes last.
+pub fn by_pad(sessions: &[Session]) -> Vec<PadSummary> {
+    let mut groups: Vec<(Option<String>, Vec<f64>)> = Vec::new();
+    for s in sessions {
+        let label = pad_label(s);
+        let key = label.as_ref().map(|l| l.to_lowercase());
+        match groups.iter_mut().find(|(l, _)| l.as_ref().map(|x| x.to_lowercase()) == key) {
+            Some((_, v)) => v.push(s.cm360),
+            None => groups.push((label, vec![s.cm360])),
+        }
+    }
+    let mut out: Vec<PadSummary> = groups
+        .into_iter()
+        .map(|(label, mut v)| {
+            v.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+            let n = v.len();
+            let median = if n % 2 == 1 { v[n / 2] } else { 0.5 * (v[n / 2 - 1] + v[n / 2]) };
+            PadSummary { label, count: n, median_cm360: median, min_cm360: v[0], max_cm360: v[n - 1] }
+        })
+        .collect();
+    out.sort_by(|a, b| a.label.is_none().cmp(&b.label.is_none()).then(b.count.cmp(&a.count)));
+    out
 }
 
 /// Test length.
@@ -160,6 +209,10 @@ pub struct Settings {
     pub last_game: Option<String>,
     /// Last used DPI.
     pub last_dpi: Option<f64>,
+    /// Last entered gear, offered again in Setup.
+    pub gear: Gear,
+    /// Opt-in: offer a browser search for the typed mousepad name. Off by default.
+    pub gear_lookup: bool,
 }
 
 impl Default for Settings {
@@ -174,6 +227,8 @@ impl Default for Settings {
             reduce_motion: false,
             last_game: None,
             last_dpi: None,
+            gear: Gear::default(),
+            gear_lookup: false,
         }
     }
 }
@@ -282,6 +337,7 @@ mod tests {
             model_advised_rounds: vec![],
             windows_mouse: Some(WindowsMouse { pointer_speed: 10, enhance_pointer_precision: false }),
             polling_hz: Some(1000.0),
+            gear: None,
             app_version: "0.1.0".into(),
         }
     }
@@ -330,6 +386,60 @@ mod tests {
         }
         let s: Session = serde_json::from_value(v).unwrap();
         assert!(!s.keep && s.band.is_none());
+        assert!(s.gear.is_none());
+    }
+
+    #[test]
+    fn groups_by_pad() {
+        use crate::gear::{PadSpeed, PadSurface};
+        let mk = |id: &str, cm: f64, gear: Option<Gear>| Session { cm360: cm, gear, ..session(id) };
+        let cloth = Gear { pad_surface: Some(PadSurface::Cloth), pad_speed: Some(PadSpeed::Control), ..Default::default() };
+        let glass = Gear { pad_name: "Glass Pad X".into(), ..Default::default() };
+        let glass_lower = Gear { pad_name: "glass pad x".into(), ..Default::default() };
+        let feet_only = Gear { feet: Some(crate::gear::Feet::Ptfe), ..Default::default() };
+        let v = vec![
+            mk("1", 40.0, Some(cloth.clone())),
+            mk("2", 44.0, Some(cloth.clone())),
+            mk("3", 30.0, Some(glass)),
+            mk("4", 50.0, None),
+            mk("5", 42.0, Some(cloth)),
+            mk("6", 34.0, Some(glass_lower)),
+            mk("7", 51.0, Some(feet_only)),
+        ];
+        let g = by_pad(&v);
+        assert_eq!(g.len(), 3);
+        assert_eq!(g[0].label.as_deref(), Some("Cloth · Control"));
+        assert_eq!((g[0].count, g[0].median_cm360, g[0].min_cm360, g[0].max_cm360), (3, 42.0, 40.0, 44.0));
+        assert_eq!(g[1].label.as_deref(), Some("Glass Pad X"));
+        assert_eq!(g[1].median_cm360, 32.0);
+        assert_eq!(g[2].label, None);
+        assert_eq!(g[2].count, 2);
+    }
+
+    #[test]
+    fn gear_round_trips_and_0_2_0_files_load() {
+        use crate::gear::{Feet, PadSpeed, PadSurface};
+        let mut s = session("g");
+        s.gear = Some(Gear {
+            pad_surface: Some(PadSurface::Glass),
+            pad_speed: Some(PadSpeed::Speed),
+            pad_name: "Pad".into(),
+            feet: Some(Feet::Glass),
+        });
+        let mut h = History::default();
+        h.push(s.clone());
+        let back: History = serde_json::from_str(&serde_json::to_string(&h).unwrap()).unwrap();
+        assert_eq!(back.sessions[0].gear, s.gear);
+        // A 0.2.0 file has no gear key at all.
+        let mut v = serde_json::to_value(session("old")).unwrap();
+        v.as_object_mut().unwrap().remove("gear");
+        let old: Session = serde_json::from_value(v).unwrap();
+        assert_eq!(old.gear, None);
+        let st: Settings = serde_json::from_str("{\"mode\": \"explorer\"}").unwrap();
+        assert!(st.gear.is_empty());
+        assert!(!st.gear_lookup, "gear lookup is off unless turned on");
+        let st2: Settings = serde_json::from_str("{\"gear\": {\"feet\": \"ptfe\"}}").unwrap();
+        assert_eq!(st2.gear.feet, Some(Feet::Ptfe));
     }
 
     #[test]

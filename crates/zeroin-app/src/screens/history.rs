@@ -45,6 +45,59 @@ impl ZeroInApp {
             widgets::dim(ui, "No results yet. Finish a test in Find my sens and it appears here.");
             return;
         }
+        // Compare and filter by self-reported mousepad.
+        let groups = zeroin_core::history::by_pad(&self.history.sessions);
+        let mut pad_filter: Option<String> = ui.ctx().data(|d| d.get_temp::<String>(crate::motion::id("hist_pad")));
+        if groups.iter().any(|g| g.label.is_some()) {
+            widgets::caption(ui, "BY MOUSEPAD");
+            let shown: Vec<&zeroin_core::history::PadSummary> = groups.iter().take(6).collect();
+            let mut labels = vec!["All".to_string()];
+            labels.extend(shown.iter().map(|g| g.label.clone().unwrap_or_else(|| "Not entered".into())));
+            let keys: Vec<String> = shown.iter().map(|g| g.label.as_ref().map(|l| l.to_lowercase()).unwrap_or_default()).collect();
+            let sel = match &pad_filter {
+                None => Some(0),
+                Some(k) => keys.iter().position(|x| x == k).map(|i| i + 1),
+            };
+            let typing = ui.ctx().egui_wants_keyboard_input();
+            let mut pick = widgets::chip_row(ui, &mut self.motion, crate::motion::id("hist_pad_chips"), &labels, sel);
+            if !typing {
+                for i in 0..labels.len().min(9) {
+                    if let Some(k) = crate::screens::setup::key_for(i) {
+                        if ui.ctx().input(|inp| inp.key_pressed(k)) {
+                            pick = Some(i);
+                        }
+                    }
+                }
+            }
+            if let Some(i) = pick {
+                pad_filter = if i == 0 { None } else { keys.get(i - 1).cloned() };
+                ui.ctx().data_mut(|d| match &pad_filter {
+                    Some(k) => {
+                        d.insert_temp(crate::motion::id("hist_pad"), k.clone());
+                    }
+                    None => {
+                        d.remove::<String>(crate::motion::id("hist_pad"));
+                    }
+                });
+            }
+            ui.add_space(6.0);
+            for g in &shown {
+                widgets::dim(
+                    ui,
+                    format!(
+                        "{}: {} result{}, median {:.1} cm/360 (range {:.1}–{:.1})",
+                        g.label.as_deref().unwrap_or("Not entered"),
+                        g.count,
+                        if g.count == 1 { "" } else { "s" },
+                        g.median_cm360,
+                        g.min_cm360,
+                        g.max_cm360
+                    ),
+                );
+            }
+            widgets::dim(ui, "Mousepad details are self-reported and never used to compute a result.");
+            ui.add_space(10.0);
+        }
         let open_id = ui.ctx().data(|d| d.get_temp::<String>(crate::motion::id("hist_open")));
         let confirm_id = ui.ctx().data(|d| d.get_temp::<String>(crate::motion::id("hist_confirm")));
         let mut toggle: Option<String> = None;
@@ -52,6 +105,12 @@ impl ZeroInApp {
         let mut ask: Option<String> = None;
         let w = ui.available_width().min(680.0);
         for s in self.history.sessions.iter().rev() {
+            let pad = zeroin_core::history::pad_label(s);
+            if let Some(f) = &pad_filter {
+                if pad.as_ref().map(|l| l.to_lowercase()).unwrap_or_default() != *f {
+                    continue;
+                }
+            }
             let open = open_id.as_deref() == Some(s.id.as_str());
             let t = self.motion.value(crate::motion::id(("hist_open", &s.id)), if open { 1.0 } else { 0.0 });
             let (rect, resp) = ui.allocate_exact_size(egui::vec2(w, 68.0), Sense::click());
@@ -63,7 +122,10 @@ impl ZeroInApp {
             ui.painter().text(
                 rect.left_center() + egui::vec2(18.0, 12.0),
                 Align2::LEFT_CENTER,
-                format!("{} · {:.0} DPI", format_date(s.created_unix), s.dpi),
+                match &pad {
+                    Some(p) => format!("{} · {:.0} DPI · {p}", format_date(s.created_unix), s.dpi),
+                    None => format!("{} · {:.0} DPI", format_date(s.created_unix), s.dpi),
+                },
                 regular(12.5),
                 TEXT_DIM,
             );
@@ -116,6 +178,9 @@ impl ZeroInApp {
                     .font(regular(12.5))
                     .color(TEXT_DIM),
                 );
+                if let Some(sum) = s.gear.as_ref().and_then(|g| g.summary()) {
+                    child.label(egui::RichText::new(sum).font(regular(12.5)).color(TEXT_DIM));
+                }
                 child.add_space(6.0);
                 let confirming = confirm_id.as_deref() == Some(s.id.as_str());
                 if widgets::secondary_button(

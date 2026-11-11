@@ -40,6 +40,34 @@ fetched at runtime.
 | EsportSettings, "Average Pro Settings by Game", https://esportsettings.com/blog/average-pro-settings-by-game/ | Median and 10th–90th percentile cm/360 for CS2, Valorant, Fortnite and Apex Legends |
 | Boudaoud, Spjut, Kim et al., "Mouse Sensitivity Effects in First-Person Targeting Tasks", CHI 2022 (arXiv:2203.12050) | Width check for the generic prior |
 
+### Gear note (0.2.1)
+
+The short mousepad and feet note on the result screen (`crates/zeroin-core/src/gear.rs`)
+is original text. Its bias table holds only aggregate figures (group sizes,
+median shifts and confidence intervals) derived offline; no per-player data,
+pad tables, photos or review text are included, and no numeric bias is applied
+because no cell meets the threshold (at least 50 players per group and a 95 %
+interval that excludes zero).
+
+| Source | Figures used |
+|---|---|
+| CSDB.gg mousepad pages and "Most Used Mousepads in CS2 (Pro Usage 2026)", data as of 9 Nov 2026, accessed 11 Nov 2026, https://csdb.gg/gear/rankings/mousepad/ | CS2 pad-category group sizes and median cm/360 comparisons. Data provided by CSDB.gg, free to use with attribution. |
+| CSDB.gg, "What Sensitivity Do CS2 Pros Use? eDPI Distribution by Role", data as of 9 Nov 2026, accessed 11 Nov 2026, https://csdb.gg/data/pro-sensitivity/ | CS2 median cm/360 (52 cm) cited in the note |
+| Richard, C. (2000), ASME IMECE; Stanford thesis "On the Identification and Haptic Display of Friction" | Friction and targeting finding, paraphrased |
+| Boudaoud, Spjut, Kim et al., CHI 2022 / IEEE Transactions on Graphics 2023 | Equal-performance band (about 20–80 cm/360), paraphrased |
+| Corsair, "Glass Mouse Pad vs Cloth" (updated 26 Mar 2026) | Manufacturer description of glass vs cloth, paraphrased |
+
+### USB vendor table (0.2.1)
+
+The vendor table in `crates/zeroin-core/src/usbid.rs` is an original, curated
+list of about twenty USB vendor IDs common on gaming mice (vendor IDs are
+assigned by the USB Implementers Forum and reported by the devices
+themselves). It is not derived from the `usb.ids` database. Device names shown
+in Check mouse are the strings the connected device reports about itself.
+
+EloShapes is only linked: Check mouse can open https://www.eloshapes.com/mouse/browse
+in the browser. No EloShapes data is fetched, stored or bundled.
+
 These sources are not affiliated with ZeroIn.
 
 The full dependency tree and its licences can be listed with `cargo tree` and

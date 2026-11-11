@@ -735,6 +735,9 @@ pub enum InvalidReason {
     Anticipations,
     /// More than 3 targets timed out.
     Timeouts,
+    /// Mouse reports arrived with chaotic timing (polling jitter far above
+    /// the pre-test reading).
+    PollingJitter,
 }
 
 impl InvalidReason {
@@ -745,6 +748,7 @@ impl InvalidReason {
             InvalidReason::InputGap => "Mouse input stopped in the middle of a movement (a gap over 250 ms).",
             InvalidReason::Anticipations => "More than two clicks came faster than a reaction is possible.",
             InvalidReason::Timeouts => "More than three targets timed out.",
+            InvalidReason::PollingJitter => "Mouse reports arrived with very uneven timing during the block.",
         }
     }
 }
@@ -759,6 +763,9 @@ impl InvalidReason {
             }
             InvalidReason::Anticipations => "Wait for each target to appear before clicking.",
             InvalidReason::Timeouts => "Click each target before it disappears: flick targets last 2.5 s and micro targets 2 s.",
+            InvalidReason::PollingJitter => {
+                "Close background apps, plug the mouse into a rear USB port without a hub, or lower the polling rate. Settings → Check mouse shows the details."
+            }
         }
     }
 }
@@ -776,7 +783,13 @@ pub struct Block {
     last_frame_us: Option<u64>,
     hitches: u32,
     severe_hitch: bool,
+    /// `Some(baseline)` when the polling-jitter rule is active (raw input only).
+    polling_rule: Option<Option<crate::polling::Jitter>>,
+    motion_log: Vec<(u64, i32, i32)>,
 }
+
+/// Motion reports kept per block for the polling-jitter rule.
+const MOTION_LOG_CAP: usize = 500_000;
 
 impl Block {
     /// Create a block with `dpc` degrees per count. `pair_seed` fixes the
@@ -786,7 +799,7 @@ impl Block {
             .iter()
             .map(|k| DrillSession::new(*k, dpc, plan, pair_seed, order_seed))
             .collect();
-        Block { sessions, index: 0, last_frame_us: None, hitches: 0, severe_hitch: false }
+        Block { sessions, index: 0, last_frame_us: None, hitches: 0, severe_hitch: false, polling_rule: None, motion_log: Vec::new() }
     }
 
     /// The drill currently shown.
@@ -804,8 +817,22 @@ impl Block {
         (self.index.min(self.sessions.len() - 1), self.sessions.len())
     }
 
+    /// Turn on the polling-jitter rule with the pre-test reading, if any.
+    /// Only meaningful with raw input timestamps.
+    pub fn enable_polling_rule(&mut self, baseline: Option<crate::polling::Jitter>) {
+        self.polling_rule = Some(baseline);
+    }
+
+    /// Polling jitter measured in this block so far.
+    pub fn polling_jitter(&self) -> Option<crate::polling::Jitter> {
+        crate::polling::jitter(&self.motion_log)
+    }
+
     /// Forward raw motion.
     pub fn motion(&mut self, dx: i32, dy: i32, now_us: u64) {
+        if self.polling_rule.is_some() && self.motion_log.len() < MOTION_LOG_CAP {
+            self.motion_log.push((now_us, dx, dy));
+        }
         if !self.is_done() {
             self.cur_mut().motion(dx, dy, now_us);
         }
@@ -884,7 +911,15 @@ impl Block {
         if self.severe_hitch || self.hitches >= 3 {
             return Err(InvalidReason::Stutter);
         }
-        block_validity(&self.result())
+        block_validity(&self.result())?;
+        if let Some(baseline) = &self.polling_rule {
+            if let Some(j) = self.polling_jitter() {
+                if crate::polling::jitter_is_chaotic(&j, baseline.as_ref()) {
+                    return Err(InvalidReason::PollingJitter);
+                }
+            }
+        }
+        Ok(())
     }
 }
 
@@ -1160,6 +1195,41 @@ mod tests {
             b.tick(t);
         }
         assert_eq!(b.validity(), Err(InvalidReason::Stutter));
+    }
+
+    fn tracking_block_with_intervals(intervals: impl Fn(u64) -> u64, rule: Option<Option<crate::polling::Jitter>>) -> Block {
+        let plan = DrillPlan { warmup: 0, flicks: 0, micros: 0, tracking_s: 2.0, ..DrillPlan::BALANCED };
+        let mut b = Block::new(0.02, &plan, 1, 1);
+        if let Some(base) = rule {
+            b.enable_polling_rule(base);
+        }
+        let mut t = 0;
+        let mut i = 0;
+        let mut guard = 0;
+        while !b.is_done() && guard < 100_000 {
+            guard += 1;
+            if !b.current().is_started() {
+                b.click(t);
+            }
+            t += intervals(i);
+            i += 1;
+            b.motion(3, if i % 2 == 0 { 2 } else { -2 }, t);
+            b.frame(t);
+            b.tick(t);
+        }
+        b
+    }
+
+    #[test]
+    fn chaotic_polling_invalidates_block() {
+        let even = |_: u64| 1_000u64;
+        let chaotic = |i: u64| (i * 7919) % 2900 + 100;
+        let baseline = crate::polling::Jitter { median_us: 1000.0, robust_cv: 0.05, n: 1000 };
+        assert_eq!(tracking_block_with_intervals(even, Some(Some(baseline))).validity(), Ok(()));
+        assert_eq!(tracking_block_with_intervals(chaotic, Some(Some(baseline))).validity(), Err(InvalidReason::PollingJitter));
+        assert_eq!(tracking_block_with_intervals(chaotic, Some(None)).validity(), Err(InvalidReason::PollingJitter));
+        // Off (no raw input timestamps): never flagged.
+        assert_eq!(tracking_block_with_intervals(chaotic, None).validity(), Ok(()));
     }
 
     #[test]

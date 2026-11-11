@@ -95,7 +95,13 @@ A block's data is not used, and the block runs again, when:
 - mouse input stopped for over 250 ms in the middle of a fast movement
   (hand speed above 25 % of the trial's peak on both sides of the gap);
 - more than two clicks were anticipations, or more than three targets timed
-  out.
+  out;
+- polling was chaotic (0.2.1, Raw Input only): the robust spread of report
+  intervals, measured only while each report carries at least 2 counts, is
+  more than 3× the value measured before the test (with a floor of 0.3), or
+  above 0.6 when no pre-test value exists. The spread is
+  1.4826 × MAD / median of the intervals, and needs at least 200 intervals.
+  Slow movement, which naturally leaves polls empty, is excluded.
 
 Pausing (Esc, Alt+Tab, minimise) also restarts the current block, without
 counting against the test. Two re-runs are allowed; a third unusable block
@@ -185,6 +191,82 @@ or ending as incomplete deletes the file.
 - **Pixel skip.** When one mouse count turns the view by more than one pixel
   at the screen centre, Setup and Result say so and suggest a higher DPI with a
   proportionally lower in-game sensitivity (same cm/360).
+
+## Check mouse (0.2.1)
+
+Settings → Check mouse captures five seconds of motion reports. On Windows a
+dedicated thread at time-critical priority owns the mouse Raw Input
+registration for the duration, waits with `MsgWaitForMultipleObjects`
+(`QS_RAWINPUT`) and drains reports with `GetRawInputBuffer`. Each read is
+timestamped with the performance counter (`QueryPerformanceCounter`, through
+Rust's `Instant`), and every report remembers how many reports came in the
+same read. When the check ends the mouse registration is handed back to the
+app's raw-input thread.
+
+Analysis (`zeroin_core::polling::check`), for the device that moved most:
+
+- Reports are split at pauses over 50 ms and grouped into 100 ms windows
+  inside each movement. A window is *fast* when it moved at least half as many
+  counts as the 90th-percentile window; at least 10 fast windows (1 s) are
+  needed, and at least 300 reports.
+- **Effective rate**: reports per second pooled over the fast windows. This
+  counts reports, so it stays valid when Windows delivers them in batches.
+- **Intervals** (inside fast windows): an interval under a quarter of the
+  expected one is *bunched*. Bunched or batched reports carry the read time,
+  not their own, so intervals touching them are left out of the 1st/99th
+  percentiles, the standard deviation, the MAD, the median-interval rate and
+  the histogram (30 bins of a tenth of the expected interval, plus overflow).
+- **Skipped polls**: intervals of 1.6× the expected one or more. Reported only
+  when the MAD is under 15 % of the expected interval; with more jitter skips
+  cannot be told apart from it and the figure reads "not measurable".
+- **Stability**: coefficient of variation of the fast-window rates.
+- **Motion limit**: the share of reports carrying only 1 count. Above 35 %, the
+  sensor often had nothing new to report, so the measured rate is a lower
+  bound and a higher setting is reported as "not confirmed" instead of failed.
+- **Rate drop on slower movement**: medium-speed windows at under 70 % of the
+  fast rate while still carrying 2 or more counts per report point to a
+  rate-switching or power-saving feature in the mouse.
+
+Verdict: the worst level among the findings (Good, OK, Problem). With a rate
+set in the mouse software, 88 % or more of it is Good. Lower rates are
+attributed in this order: movement too slow (motion limit), the PC (over 30 %
+bunched and mostly batched), a clean lower standard rate (mouse, receiver,
+port or setting; listed together because Windows cannot separate them), or an
+uneven rate (mouse mode or USB controller, with a rear-port retest to tell
+them apart). "High-rate mode not delivered" is shown when 4000 Hz or more is
+set, under half arrives, and neither slow movement nor the PC explains it.
+Without a set rate, the nearest standard rate within 12 % is reported.
+
+Device identity: the Raw Input device name (`RIDI_DEVICENAME`) is parsed for
+the USB or Bluetooth vendor and product ID, and the HID product and
+manufacturer strings are read with `HidD_GetProductString` /
+`HidD_GetManufacturerString` on a handle opened with no access rights. A
+small original vendor table names common gaming brands and marks chip makers
+whose IDs appear under many brands. A wireless receiver reports its own name,
+which is shown as such.
+
+Limits: the timestamps are arrival times at ZeroIn, not the moment the mouse
+sent a report, and device-side USB or radio timing cannot be seen from
+Windows. Off Windows the check reports "not measurable"; developers can set
+`ZEROIN_DEV_POLL=<hz>[:<jitter>]` for a labelled synthetic stream.
+
+## Gear (0.2.1)
+
+Mousepad surface, speed class, an optional name and mouse feet are optional
+Setup steps. They are saved in settings (prefilled next time) and with each
+result, and History groups results by mousepad (count, median and range of
+recommended cm/360) with a filter. They are not inputs to the search, the
+scores or the decision.
+
+When a pad or feet value is present the result screen adds a short note with
+sources ("Why we say this"): public CS2 pro data (CSDB.gg, n = 816) shows no
+reliable difference in chosen sensitivity between control, balanced and speed
+cloth pads, glass has n = 5 and feet n = 0. The note suggests, optionally,
+trying about 5–10 % more cm/360 and retesting if stopping feels hard on a
+faster surface, and shows those values for the measured result. A data-driven
+bias table exists in code (`gear::BIAS_CELLS`): a cell can drive a bias only
+with at least 50 players per group and a 95 % interval that excludes zero,
+capped at ±10 %. No shipped cell qualifies, so no bias is applied.
 
 ## The local AI's role
 

@@ -31,11 +31,15 @@ llama-cpp-2 = { version = "0.1.161", optional = true, default-features = false }
 [target.'cfg(windows)'.dependencies]
 raw-window-handle = "0.6"
 windows = { version = "0.62", features = [
+    "Win32_Devices_HumanInterfaceDevice",
     "Win32_Foundation",
     "Win32_Graphics_Gdi",
     "Win32_System_LibraryLoader",
     "Win32_System_Time",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Threading",
     "Win32_UI_Input",
+    "Win32_UI_Shell",
     "Win32_UI_WindowsAndMessaging",
 ] }
 

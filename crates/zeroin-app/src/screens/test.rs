@@ -386,9 +386,16 @@ impl ZeroInApp {
         if esc {
             back = true;
         }
+        let native = self.raw.is_native();
+        let baseline = self.polling.baseline;
         let Some(t) = self.test.as_mut() else { return };
         if start {
             t.start_block(platform::now_us());
+            if native {
+                if let Some(b) = t.block.as_mut() {
+                    b.enable_polling_rule(baseline);
+                }
+            }
         } else if back {
             self.step = Step::Setup;
         }

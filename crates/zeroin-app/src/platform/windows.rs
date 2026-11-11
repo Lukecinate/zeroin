@@ -20,6 +20,10 @@ const RI_MOUSE_LEFT_BUTTON_UP: u16 = 0x0002;
 const MOUSE_MOVE_ABSOLUTE: u16 = 0x0001;
 const RI_KEY_BREAK: u16 = 0x0001;
 
+/// Message-only window of the raw-input thread, so the polling check can hand
+/// mouse input back to it when it finishes.
+pub(crate) static MAIN_RAW_HWND: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(0);
+
 pub struct RawInput {
     rx: Option<Receiver<InputEvent>>,
 }
@@ -76,6 +80,7 @@ impl RawInput {
                     let _ = ready_tx.send(false);
                     return;
                 }
+                MAIN_RAW_HWND.store(hwnd.0 as isize, std::sync::atomic::Ordering::SeqCst);
                 let _ = ready_tx.send(true);
                 let mut msg = MSG::default();
                 let mut buf: Vec<u8> = vec![0; 256];
@@ -273,4 +278,15 @@ pub fn local_offset_secs(unix: u64) -> Option<i64> {
     }
     let lticks = ((lft.dwHighDateTime as u64) << 32) | lft.dwLowDateTime as u64;
     Some((lticks as i64 - ticks as i64) / 10_000_000)
+}
+
+/// Open a URL with the shell (already validated as HTTPS by the caller).
+pub(crate) fn open_url_impl(url: &str) -> bool {
+    use windows::core::HSTRING;
+    use windows::Win32::UI::Shell::ShellExecuteW;
+    use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+    let file = HSTRING::from(url);
+    // SAFETY: all strings are valid, null-terminated HSTRINGs for the call's duration.
+    let r = unsafe { ShellExecuteW(None, w!("open"), &file, PCWSTR::null(), PCWSTR::null(), SW_SHOWNORMAL) };
+    r.0 as isize > 32
 }

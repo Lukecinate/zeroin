@@ -4,6 +4,26 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [0.2.1] - 2026-11-11
+
+### Added
+- **Check mouse** (Settings → Devices → Check mouse). A five-second capture of mouse Raw Input, read in buffered batches (`GetRawInputBuffer`) on a time-critical thread and timestamped with the performance counter. Reports the effective rate, the rate from the median interval, 1st/99th-percentile intervals, jitter (standard deviation and MAD), skipped polls, bunched and batched delivery, the share of 1-count reports, rate stability over time, a rate graph and an interval histogram. Every figure is computed from the capture; figures that cannot be measured say so with the reason.
+- **Polling verdict.** Good, OK or Problem against the rate set in the mouse software (chips, keys 1–7), with plain-language findings and the likely source: the mouse or its settings, the USB port or wireless link, the PC, or how the mouse was moved. A high setting that is far from delivered and not explained by slow movement or the PC is flagged as "High-rate mode not delivered". Movement too slow to fill every poll is reported as "not confirmed", not as a mouse fault.
+- **Device identity.** The device's own product and manufacturer strings (HID) and its USB or Bluetooth vendor/product ID from the Raw Input device path, with a small original vendor table for common gaming brands and chip makers. Wireless receivers are shown as receivers. A "View specs on EloShapes" button opens eloshapes.com in the browser; no EloShapes data is fetched or bundled.
+- **Polling-jitter validity rule.** With Raw Input, a block whose report-interval spread (robust CV while the hand moves fast) is more than 3× the pre-test value, with a floor, or above an absolute limit without a pre-test value, runs again like other invalid blocks.
+- **Optional gear.** Two skippable Setup steps: mousepad surface (Cloth, Hybrid, Glass, Hard/plastic, Other), speed class (Speed, Balanced, Control) and an optional name; mouse feet (Stock, PTFE, Glass, Ceramic, Other). Values are prefilled next time, stored with each result, shown in Result and History, and History can filter and compare results by mousepad. Free text is cleaned (control and invisible formatting characters removed, at most 60 characters).
+- **Gear note.** When gear is filled in, the result screen shows a short, cited note: public CS2 pro data shows no reliable sensitivity difference by pad category, so ZeroIn does not change the number; if stopping feels hard on a faster surface, trying about 5–10 % more cm/360 and retesting is offered as an option, with the values for the measured result. The note never changes a measured number. A data-driven bias table is in place but disabled: a bias needs at least 50 players per group and a 95 % interval excluding zero, capped at ±10 %, and no current cell qualifies.
+- **Gear lookup in your browser** (opt-in, off by default). Opens a web search for the typed mousepad name in the default browser. The query is sanitised; the app itself makes no network connection.
+
+### Changed
+- Setup has 8 steps; the two gear steps can be skipped with Enter.
+- About and README privacy text describe the two user-initiated browser links.
+
+### Known limitations
+- Check mouse was verified with synthetic timestamp streams and a development mock only; it has not yet been run against real 4000–8000 Hz hardware.
+- Timestamps are arrival times at ZeroIn; device-side USB or wireless timing is not visible from Windows.
+- Gear lookup opens a browser search only; there is no automatic material analysis of product pages.
+
 ## [0.2.0] - 2026-11-11
 
 ### Changed

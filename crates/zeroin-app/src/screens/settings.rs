@@ -119,7 +119,11 @@ impl ZeroInApp {
                 None if self.raw.is_native() => "Move the mouse in circles to measure.".into(),
                 None => "Raw input unavailable on this platform.".into(),
             };
-            widgets::setting_row(ui, "Mouse polling rate", &poll, |_| {});
+            widgets::setting_row(ui, "Mouse polling rate", &poll, |ui| {
+                if widgets::secondary_button(ui, &mut self.motion, "Check mouse", None).clicked() {
+                    self.mouse_check.open = true;
+                }
+            });
             let disp = match self.display {
                 Some(d) => format!("{}×{} at {} Hz (max {} Hz at this resolution)", d.width, d.height, d.current_hz, d.max_hz),
                 None => "Unknown".into(),
@@ -239,6 +243,19 @@ impl ZeroInApp {
                 self.settings.reduce_motion = rm;
                 self.save_settings();
             }
+            let mut gl = self.settings.gear_lookup;
+            widgets::setting_row(
+                ui,
+                "Gear lookup in your browser",
+                "Off by default. When on, Setup offers a button that opens a web search for the mousepad name you typed, in your own browser. Only that name goes to the search site; ZeroIn itself sends nothing and reads nothing back.",
+                |ui| {
+                    widgets::toggle(ui, &mut self.motion, crate::motion::id("gl_toggle"), &mut gl, true);
+                },
+            );
+            if gl != self.settings.gear_lookup {
+                self.settings.gear_lookup = gl;
+                self.save_settings();
+            }
             let dir = crate::paths::data_dir();
             widgets::setting_row(ui, "Data folder", &dir.display().to_string(), |ui| {
                 if widgets::secondary_button(ui, &mut self.motion, "Open", None).clicked() {
@@ -252,7 +269,7 @@ impl ZeroInApp {
         widgets::card(ui, |ui| {
             ui.set_width(w);
             ui.label(egui::RichText::new(format!("ZeroIn {}", env!("CARGO_PKG_VERSION"))).font(semibold(15.0)));
-            widgets::dim(ui, "MIT License · Windows 10 and 11 · Fully local: no accounts, no telemetry, no network access.");
+            widgets::dim(ui, "MIT License · Windows 10 and 11 · Fully local: no accounts, no telemetry; the app makes no network connections. Links open in your browser only when you click them.");
             widgets::dim(
                 ui,
                 "Third-party licences (model, font, icons, libraries) are listed in THIRD_PARTY_NOTICES.md in the install folder.",
