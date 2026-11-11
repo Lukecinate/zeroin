@@ -39,6 +39,7 @@ Test, Result and Settings were captured from version 0.2.0, Setup and History fr
 - **Hall-effect keyboards.** A raw-input keyboard check shows the fastest release-to-press time per key (rapid trigger), and analog key depth when the Wooting Analog SDK is installed.
 - **Results and conversions.** Recommended sensitivity, cm/360, in/360, eDPI and the equivalent in every other supported game. History is saved locally, and 0.1 history still opens.
 - **Apply to Windows, with undo.** One action sets "Enhance pointer precision" off and pointer speed to 10 for your Windows account, after showing current and new values. Your previous values are saved first and Restore previous puts them back. In-game sensitivity is never written; you enter the recommended value in the game.
+- **Neutral settings for a test only.** Before a test, ZeroIn can ask to set precision off and speed 10 just while drills run (Ask / Always / Never in Settings). Your values are journalled first and restored when a drill stops, on Esc, focus loss, close, after a crash at the next launch, or at sign-out. The change is session-only and never saved to your Windows profile; a small notice shows on the drill screen while it is active. Declining is fine: drills read raw mouse counts, which these settings do not scale.
 - **Simple to drive.** Three sections (Find my sens, History, Settings), one primary button per screen, Enter for next, Esc for back, number keys for options, F1–F3 for sections.
 
 ## Install
@@ -60,7 +61,7 @@ Get-FileHash .\ZeroIn-Setup-0.2.1-x64.exe -Algorithm SHA256
 
 ## Privacy
 
-ZeroIn is fully local. It has no accounts, no telemetry, no analytics and makes no network requests. Settings, history (including any mousepad and feet you enter), an unfinished test and the pointer-settings backup are stored in `%APPDATA%\ZeroIn` as JSON. The per-game priors and the USB vendor table are constant tables built into the app; nothing is downloaded. Windows settings are changed only when you confirm Apply to Windows or Restore previous. The AI model runs on your CPU and only sees aggregate drill scores.
+ZeroIn is fully local. It has no accounts, no telemetry, no analytics and makes no network requests. Settings, history (including any mousepad and feet you enter), an unfinished test and the pointer-settings backup are stored in `%APPDATA%\ZeroIn` as JSON. The per-game priors and the USB vendor table are constant tables built into the app; nothing is downloaded. Windows settings are changed only when you confirm Apply to Windows or Restore previous, or agree to neutral settings for a test (restored afterwards; the previous values are kept in `mouse-temp.json` until then). The AI model runs on your CPU and only sees aggregate drill scores.
 
 Two buttons open a page in your own web browser, and only when you click them:
 
@@ -114,6 +115,7 @@ Version 0.2.1. See [CHANGELOG.md](CHANGELOG.md) for what is included.
 - The search and its settings were tuned in simulation with synthetic players; a study with real players has not been run yet.
 - Check mouse times reports when Windows hands them to ZeroIn, not when the mouse sends them; device-side USB or wireless timing is not visible from Windows. It has been verified with synthetic streams only, not yet on real 4000–8000 Hz hardware.
 - Gear lookup opens a browser search only; there is no automatic material analysis of product pages.
+- Neutral settings for a test were verified with mocked Windows settings; the Win32 calls are compile-checked but have not yet been run on a Windows PC.
 - The search does not yet carry what it learned into your next session; each test starts from the per-game prior.
 - The pixel-skip warning uses the primary display's width and the game's default field of view.
 

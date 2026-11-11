@@ -105,6 +105,7 @@ impl ZeroInApp {
                 let g = self.settings.gear.sanitized();
                 (!g.is_empty()).then_some(g)
             },
+            pointer_during_test: self.temp_mouse.during_test,
             app_version: env!("CARGO_PKG_VERSION").to_string(),
         };
         let f = facts(&session, &owned);
@@ -285,6 +286,8 @@ impl ZeroInApp {
         widgets::dim(ui, format!("Enter {text} in {}'s own sensitivity setting. ZeroIn does not change game files.", s.game.name));
         ui.add_space(2.0);
         widgets::dim(ui, format!("Windows: {}", self.win_mouse_summary()));
+        ui.add_space(6.0);
+        self.temp_mouse_result_note(ui, &s);
         ui.add_space(6.0);
         self.win_mouse_panel(ui, "result");
         ui.add_space(14.0);

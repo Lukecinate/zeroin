@@ -85,6 +85,9 @@ pub struct Session {
     /// 0.2.1: self-reported mousepad and feet. Context only; never used in the result.
     #[serde(default)]
     pub gear: Option<Gear>,
+    /// 0.2.1: whether Windows pointer settings were neutral for the test.
+    #[serde(default)]
+    pub pointer_during_test: Option<crate::winmouse::PointerDuringTest>,
     /// App version that produced the session.
     pub app_version: String,
 }
@@ -213,6 +216,9 @@ pub struct Settings {
     pub gear: Gear,
     /// Opt-in: offer a browser search for the typed mousepad name. Off by default.
     pub gear_lookup: bool,
+    /// Temporary neutral Windows pointer settings during tests:
+    /// `None` asks before each test, `Some(true)` always, `Some(false)` never.
+    pub temp_mouse: Option<bool>,
 }
 
 impl Default for Settings {
@@ -229,6 +235,7 @@ impl Default for Settings {
             last_dpi: None,
             gear: Gear::default(),
             gear_lookup: false,
+            temp_mouse: None,
         }
     }
 }
@@ -338,6 +345,7 @@ mod tests {
             windows_mouse: Some(WindowsMouse { pointer_speed: 10, enhance_pointer_precision: false }),
             polling_hz: Some(1000.0),
             gear: None,
+            pointer_during_test: None,
             app_version: "0.1.0".into(),
         }
     }
@@ -435,9 +443,11 @@ mod tests {
         v.as_object_mut().unwrap().remove("gear");
         let old: Session = serde_json::from_value(v).unwrap();
         assert_eq!(old.gear, None);
+        assert_eq!(old.pointer_during_test, None);
         let st: Settings = serde_json::from_str("{\"mode\": \"explorer\"}").unwrap();
         assert!(st.gear.is_empty());
         assert!(!st.gear_lookup, "gear lookup is off unless turned on");
+        assert_eq!(st.temp_mouse, None, "older settings ask before the test");
         let st2: Settings = serde_json::from_str("{\"gear\": {\"feet\": \"ptfe\"}}").unwrap();
         assert_eq!(st2.gear.feet, Some(Feet::Ptfe));
     }

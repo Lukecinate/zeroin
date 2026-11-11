@@ -202,6 +202,7 @@ impl ZeroInApp {
         let preset = Preset::for_game(&profile.id);
         // A new test replaces any unfinished one.
         self.discard_saved_test();
+        self.temp_mouse.reset_for_test();
         self.test = Some(TestState {
             fingerprint: fp,
             profile,
@@ -236,6 +237,7 @@ impl ZeroInApp {
         let Some(saved) = self.saved_test.take() else { return };
         self.setup.apply(&saved.game, saved.dpi, saved.start_sens);
         let fp = self.setup.fingerprint();
+        self.temp_mouse.reset_for_test();
         self.test = Some(TestState::from_saved(saved, fp));
         self.result = None;
         self.section = crate::app::Section::Find;
@@ -386,6 +388,12 @@ impl ZeroInApp {
         if esc {
             back = true;
         }
+        if std::mem::take(&mut self.temp_mouse.start_after_prompt) {
+            start = true;
+        }
+        if start && !self.temp_mouse_ready_to_start() {
+            start = false;
+        }
         let native = self.raw.is_native();
         let baseline = self.polling.baseline;
         let Some(t) = self.test.as_mut() else { return };
@@ -527,6 +535,15 @@ impl ZeroInApp {
         let poll = self.polling.last.map(|s| format!(" · mouse {:.0} Hz", s.rate_hz)).unwrap_or_default();
         p.text(full.right_top() + egui::vec2(-24.0, 20.0), Align2::RIGHT_TOP, format!("{fps} fps{hz}{poll}"), regular(12.5), TEXT_FAINT);
         p.text(full.left_bottom() + egui::vec2(24.0, -20.0), Align2::LEFT_BOTTOM, "Esc  pause", regular(12.5), TEXT_FAINT);
+        if self.temp_mouse.is_active() {
+            p.text(
+                full.center_bottom() + egui::vec2(0.0, -20.0),
+                Align2::CENTER_BOTTOM,
+                "Windows settings temporarily changed",
+                regular(12.5),
+                CORAL,
+            );
+        }
         let left = (t.seconds_left() - block.progress(now) * t.block_estimate_s()).max(0.0);
         p.text(full.right_bottom() + egui::vec2(-24.0, -20.0), Align2::RIGHT_BOTTOM, format_time_left(left), regular(12.5), TEXT_FAINT);
         // Session progress across all blocks.

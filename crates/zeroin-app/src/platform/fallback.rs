@@ -62,6 +62,14 @@ pub fn set_mouse_params(p: zeroin_core::winmouse::MouseParams) -> Result<(), Str
     }
 }
 
+/// Session-only write; off Windows this only touches the in-memory dev mock.
+pub fn set_mouse_params_session(p: zeroin_core::winmouse::MouseParams) -> Result<(), String> {
+    set_mouse_params(p)
+}
+
+/// No sign-out notice off Windows.
+pub fn watch_session_end(_on_end: fn()) {}
+
 pub fn confine_cursor(_hwnd: isize) {}
 
 pub fn release_cursor() {}

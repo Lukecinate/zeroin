@@ -22,6 +22,7 @@ fn main() -> eframe::Result {
     let default_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         platform::release_cursor();
+        let _ = screens::tempmouse::restore_now();
         default_hook(info);
     }));
     let viewport = eframe::egui::ViewportBuilder::default()

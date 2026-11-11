@@ -104,6 +104,7 @@ pub struct ZeroInApp {
     pub vsync_off: bool,
     pub cursor: zeroin_core::cursor::CursorCapture,
     pub win_mouse: crate::screens::winmouse::WinMouseUi,
+    pub temp_mouse: crate::screens::tempmouse::TempMouseUi,
     pub frame_times: std::collections::VecDeque<f64>,
 }
 
@@ -134,7 +135,7 @@ impl ZeroInApp {
         if saved_test.is_none() {
             let _ = std::fs::remove_file(crate::paths::saved_test_file());
         }
-        ZeroInApp {
+        let mut app = ZeroInApp {
             section: Section::Find,
             step: Step::Setup,
             motion,
@@ -163,8 +164,11 @@ impl ZeroInApp {
             vsync_off: false,
             cursor: Default::default(),
             win_mouse: crate::screens::winmouse::WinMouseUi::load(),
+            temp_mouse: Default::default(),
             frame_times: Default::default(),
-        }
+        };
+        app.temp_mouse_startup();
+        app
     }
 
     pub fn save_settings(&self) {
@@ -434,6 +438,7 @@ impl eframe::App for ZeroInApp {
         self.collect_input(&ctx);
         self.poll_llm();
         self.win_mouse_keys(&ctx);
+        self.temp_mouse_keys(&ctx);
         self.global_keys(&ctx);
         self.update_vsync(frame);
 
@@ -462,12 +467,15 @@ impl eframe::App for ZeroInApp {
             }
         }
         self.sync_cursor(&ctx, window_hwnd(frame));
+        self.sync_temp_mouse(&ctx);
         self.win_mouse_dialog(&ctx);
+        self.temp_mouse_dialog(&ctx);
         self.draw_toast(ui);
         self.motion.end_frame(&ctx);
     }
 
     fn on_exit(&mut self) {
+        self.temp_mouse_exit();
         self.cursor.force_release();
         crate::platform::release_cursor();
         self.save_settings();

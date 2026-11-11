@@ -146,6 +146,7 @@ impl ZeroInApp {
             let ms = self.win_mouse_summary();
             widgets::setting_row(ui, "Windows mouse settings", &ms, |_| {});
             self.win_mouse_panel(ui, "settings");
+            self.temp_mouse_setting(ui);
             // Haptics
             let mut hap = self.settings.haptics_enabled && self.haptics_available;
             widgets::setting_row(

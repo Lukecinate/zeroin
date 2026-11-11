@@ -206,10 +206,21 @@ pub fn mouse_params() -> Option<zeroin_core::winmouse::MouseParams> {
 /// Write pointer speed and acceleration for the current user (no admin
 /// rights needed), persist them, and notify other apps.
 pub fn set_mouse_params(p: zeroin_core::winmouse::MouseParams) -> Result<(), String> {
+    write_mouse_params(p, true)
+}
+
+/// Write pointer settings for this sign-in session only: other apps are
+/// notified, but the user profile is not updated, so signing out or
+/// restarting brings back the saved values even if ZeroIn cannot restore.
+pub fn set_mouse_params_session(p: zeroin_core::winmouse::MouseParams) -> Result<(), String> {
+    write_mouse_params(p, false)
+}
+
+fn write_mouse_params(p: zeroin_core::winmouse::MouseParams, persist: bool) -> Result<(), String> {
     use windows::Win32::UI::WindowsAndMessaging::{SPIF_SENDCHANGE, SPIF_UPDATEINIFILE, SPI_SETMOUSE, SPI_SETMOUSESPEED};
     let p = p.sanitized();
     let mut accel: [i32; 3] = [p.threshold1, p.threshold2, p.acceleration];
-    let flags = SPIF_UPDATEINIFILE | SPIF_SENDCHANGE;
+    let flags = if persist { SPIF_UPDATEINIFILE | SPIF_SENDCHANGE } else { SPIF_SENDCHANGE };
     // SAFETY: SPI_SETMOUSE takes a pointer to three INTs; SPI_SETMOUSESPEED
     // takes the speed itself in pvParam (documented, not a pointer).
     unsafe {
@@ -217,6 +228,57 @@ pub fn set_mouse_params(p: zeroin_core::winmouse::MouseParams) -> Result<(), Str
         SystemParametersInfoW(SPI_SETMOUSESPEED, 0, Some(p.speed as usize as *mut _), flags).map_err(|e| format!("Pointer speed: {e}"))?;
     }
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Sign-out / shutdown notice
+
+static SESSION_END: std::sync::OnceLock<fn()> = std::sync::OnceLock::new();
+
+unsafe extern "system" fn session_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+    use windows::Win32::UI::WindowsAndMessaging::{WM_ENDSESSION, WM_QUERYENDSESSION};
+    match msg {
+        WM_QUERYENDSESSION => LRESULT(1),
+        WM_ENDSESSION => {
+            if wparam.0 != 0 {
+                if let Some(f) = SESSION_END.get() {
+                    f();
+                }
+            }
+            LRESULT(0)
+        }
+        _ => unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) },
+    }
+}
+
+/// Call `on_end` when Windows signs out or shuts down. Uses a hidden
+/// top-level window on its own thread (message-only windows do not get
+/// WM_ENDSESSION). The window is never shown.
+pub fn watch_session_end(on_end: fn()) {
+    if SESSION_END.set(on_end).is_err() {
+        return;
+    }
+    let _ = std::thread::Builder::new().name("zeroin-session-end".into()).spawn(|| {
+        use windows::Win32::UI::WindowsAndMessaging::{TranslateMessage, WS_EX_TOOLWINDOW, WS_POPUP};
+        // SAFETY: plain Win32 calls on this thread's own hidden window.
+        unsafe {
+            let Ok(hinstance) = GetModuleHandleW(None) else { return };
+            let class = w!("ZeroInSessionEnd");
+            let wc =
+                WNDCLASSW { lpfnWndProc: Some(session_wndproc), hInstance: hinstance.into(), lpszClassName: class, ..Default::default() };
+            RegisterClassW(&wc);
+            if CreateWindowExW(WS_EX_TOOLWINDOW, class, w!("ZeroIn"), WS_POPUP, 0, 0, 0, 0, None, None, Some(hinstance.into()), None)
+                .is_err()
+            {
+                return;
+            }
+            let mut msg = MSG::default();
+            while GetMessageW(&mut msg, None, 0, 0).as_bool() {
+                let _ = TranslateMessage(&msg);
+                DispatchMessageW(&msg);
+            }
+        }
+    });
 }
 
 // ---------------------------------------------------------------------------

@@ -147,6 +147,129 @@ pub fn backup_after_restore(backup: MouseBackup, result: Verify) -> MouseBackup 
     }
 }
 
+// ---------------------------------------------------------------------------
+// Temporary neutral settings for the length of a test
+
+/// Pointer settings in effect while a test was played, stored with the result.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PointerDuringTest {
+    /// Windows was already at pointer speed 10 with precision off.
+    AlreadyNeutral,
+    /// ZeroIn set neutral values for the test and restored them afterwards.
+    TemporarilyNeutral,
+    /// The user's own settings were left as they were.
+    LeftAsIs,
+}
+
+/// Written to disk before neutral values are applied for a test
+/// (`mouse-temp.json`), so an interrupted run can be undone on next launch.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TempJournal {
+    /// The user's settings to put back, thresholds included.
+    pub previous: MouseParams,
+    /// What ZeroIn set.
+    pub applied: MouseParams,
+    /// When the journal was written (Unix seconds).
+    pub saved_unix: u64,
+}
+
+/// Reads and writes pointer settings for the current sign-in session only.
+pub trait PointerBackend {
+    /// Current settings, or `None` when they cannot be read.
+    fn read(&mut self) -> Option<MouseParams>;
+    /// Set values for this session without saving them to the user profile.
+    fn write_session(&mut self, p: MouseParams) -> Result<(), String>;
+}
+
+/// Storage for the [`TempJournal`].
+pub trait JournalStore {
+    /// Save, replacing any existing journal.
+    fn save(&mut self, j: &TempJournal) -> Result<(), String>;
+    /// The saved journal, if one exists and is readable.
+    fn load(&mut self) -> Option<TempJournal>;
+    /// Delete the journal; deleting a missing journal is not an error.
+    fn remove(&mut self) -> Result<(), String>;
+}
+
+/// Outcome of [`begin_temp`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum BeginTemp {
+    /// Nothing to change.
+    AlreadyNeutral,
+    /// Neutral values are active; pass the journal to [`end_temp`].
+    Applied(TempJournal),
+    /// Nothing is left changed; the reason is shown to the user.
+    Failed(String),
+}
+
+/// Apply neutral settings for a test: read, journal, write, verify. Any
+/// failure puts the previous values back and removes the journal.
+pub fn begin_temp(be: &mut dyn PointerBackend, js: &mut dyn JournalStore, now_unix: u64) -> BeginTemp {
+    let Some(cur) = be.read() else { return BeginTemp::Failed("Windows pointer settings could not be read.".into()) };
+    if cur.is_neutral() {
+        return BeginTemp::AlreadyNeutral;
+    }
+    let j = TempJournal { previous: cur, applied: MouseParams::NEUTRAL, saved_unix: now_unix };
+    if let Err(e) = js.save(&j) {
+        return BeginTemp::Failed(format!("Nothing was changed: the restore copy could not be saved ({e})."));
+    }
+    let wrote = be.write_session(MouseParams::NEUTRAL);
+    let check = verify(MouseParams::NEUTRAL, be.read());
+    if wrote.is_ok() && check == Verify::Ok {
+        return BeginTemp::Applied(j);
+    }
+    // Undo a partial write; keep the journal if even that fails.
+    let undone = be.write_session(cur).is_ok() && verify(cur, be.read()) == Verify::Ok;
+    if undone {
+        let _ = js.remove();
+    }
+    BeginTemp::Failed(match (wrote, check) {
+        (Err(e), _) => format!("Windows did not accept the change ({e})."),
+        (Ok(()), Verify::Mismatch { .. }) => "Windows reports different values; a policy or mouse software may override them.".into(),
+        _ => "The change could not be confirmed.".into(),
+    })
+}
+
+/// Put the journalled settings back. The journal is removed only once
+/// Windows reports the previous values, so a failed restore is retried on
+/// next launch.
+pub fn end_temp(be: &mut dyn PointerBackend, js: &mut dyn JournalStore, j: &TempJournal) -> Result<(), String> {
+    be.write_session(j.previous)?;
+    match verify(j.previous, be.read()) {
+        Verify::Ok => js.remove(),
+        Verify::Mismatch { .. } => Err("Windows reports different values after restoring.".into()),
+        Verify::Unreadable => Err("The restored values could not be read back.".into()),
+    }
+}
+
+/// Outcome of [`recover_temp`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Recovery {
+    /// No journal: the last run ended normally.
+    Nothing,
+    /// The previous settings were put back.
+    Restored(MouseParams),
+    /// Windows no longer shows ZeroIn's values (signed out, restarted, or
+    /// changed by the user), so nothing was written; the journal is removed.
+    NotNeeded,
+    /// Restoring failed; the journal is kept for the next launch.
+    Failed(String),
+}
+
+/// Start-up check after an interrupted test.
+pub fn recover_temp(be: &mut dyn PointerBackend, js: &mut dyn JournalStore) -> Recovery {
+    let Some(j) = js.load() else { return Recovery::Nothing };
+    let Some(cur) = be.read() else { return Recovery::Failed("Windows pointer settings could not be read.".into()) };
+    if verify(j.applied, Some(cur)) != Verify::Ok {
+        let _ = js.remove();
+        return Recovery::NotNeeded;
+    }
+    match end_temp(be, js, &j) {
+        Ok(()) => Recovery::Restored(j.previous),
+        Err(e) => Recovery::Failed(e),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -204,5 +327,142 @@ mod tests {
         let b = MouseBackup { previous: Some(WIN_DEFAULT), saved_unix: 5 };
         let s = serde_json::to_string(&b).unwrap();
         assert_eq!(serde_json::from_str::<MouseBackup>(&s).unwrap(), b);
+    }
+
+    #[derive(Default)]
+    struct MockPc {
+        cur: Option<MouseParams>,
+        /// Values Windows silently keeps instead of what is written (policy).
+        forced: Option<MouseParams>,
+        fail_writes: bool,
+        writes: Vec<MouseParams>,
+    }
+
+    impl PointerBackend for MockPc {
+        fn read(&mut self) -> Option<MouseParams> {
+            self.cur
+        }
+        fn write_session(&mut self, p: MouseParams) -> Result<(), String> {
+            if self.fail_writes {
+                return Err("denied".into());
+            }
+            self.writes.push(p);
+            self.cur = Some(self.forced.unwrap_or(p));
+            Ok(())
+        }
+    }
+
+    #[derive(Default)]
+    struct MockJournal {
+        j: Option<TempJournal>,
+        fail_save: bool,
+    }
+
+    impl JournalStore for MockJournal {
+        fn save(&mut self, j: &TempJournal) -> Result<(), String> {
+            if self.fail_save {
+                return Err("disk full".into());
+            }
+            self.j = Some(*j);
+            Ok(())
+        }
+        fn load(&mut self) -> Option<TempJournal> {
+            self.j
+        }
+        fn remove(&mut self) -> Result<(), String> {
+            self.j = None;
+            Ok(())
+        }
+    }
+
+    const USER: MouseParams = MouseParams { threshold1: 4, threshold2: 12, acceleration: 1, speed: 13 };
+
+    #[test]
+    fn temp_apply_and_exact_restore() {
+        let mut pc = MockPc { cur: Some(USER), ..Default::default() };
+        let mut js = MockJournal::default();
+        let BeginTemp::Applied(j) = begin_temp(&mut pc, &mut js, 7) else { panic!("not applied") };
+        assert_eq!(pc.cur, Some(MouseParams::NEUTRAL));
+        assert_eq!(js.j, Some(j), "journal written");
+        assert_eq!(j.previous, USER);
+        end_temp(&mut pc, &mut js, &j).unwrap();
+        assert_eq!(pc.cur, Some(USER), "thresholds restored exactly");
+        assert!(js.j.is_none(), "journal removed after restore");
+    }
+
+    #[test]
+    fn temp_never_writes_without_a_journal() {
+        let mut pc = MockPc { cur: Some(USER), ..Default::default() };
+        let mut js = MockJournal { fail_save: true, ..Default::default() };
+        assert!(matches!(begin_temp(&mut pc, &mut js, 0), BeginTemp::Failed(_)));
+        assert!(pc.writes.is_empty());
+        assert_eq!(pc.cur, Some(USER));
+    }
+
+    #[test]
+    fn temp_skips_neutral_and_unreadable() {
+        let mut js = MockJournal::default();
+        let mut pc = MockPc { cur: Some(MouseParams::NEUTRAL), ..Default::default() };
+        assert_eq!(begin_temp(&mut pc, &mut js, 0), BeginTemp::AlreadyNeutral);
+        let mut pc = MockPc::default();
+        assert!(matches!(begin_temp(&mut pc, &mut js, 0), BeginTemp::Failed(_)));
+        assert!(js.j.is_none() && pc.writes.is_empty());
+    }
+
+    #[test]
+    fn temp_overridden_by_policy_is_undone() {
+        let mut pc = MockPc { cur: Some(USER), forced: Some(USER), ..Default::default() };
+        let mut js = MockJournal::default();
+        assert!(matches!(begin_temp(&mut pc, &mut js, 0), BeginTemp::Failed(_)));
+        assert_eq!(pc.cur, Some(USER));
+        assert!(js.j.is_none());
+        let mut pc = MockPc { cur: Some(USER), fail_writes: true, ..Default::default() };
+        assert!(matches!(begin_temp(&mut pc, &mut js, 0), BeginTemp::Failed(_)));
+        assert_eq!(js.j.map(|j| j.previous), Some(USER), "journal kept when the undo itself fails");
+    }
+
+    #[test]
+    fn failed_restore_keeps_journal() {
+        let mut pc = MockPc { cur: Some(USER), ..Default::default() };
+        let mut js = MockJournal::default();
+        let BeginTemp::Applied(j) = begin_temp(&mut pc, &mut js, 0) else { panic!() };
+        pc.fail_writes = true;
+        assert!(end_temp(&mut pc, &mut js, &j).is_err());
+        assert!(js.j.is_some());
+    }
+
+    #[test]
+    fn crash_recovery() {
+        // Crash mid-test: neutral values still active, journal on disk.
+        let mut pc = MockPc { cur: Some(USER), ..Default::default() };
+        let mut js = MockJournal::default();
+        let BeginTemp::Applied(_) = begin_temp(&mut pc, &mut js, 0) else { panic!() };
+        assert_eq!(recover_temp(&mut pc, &mut js), Recovery::Restored(USER));
+        assert_eq!(pc.cur, Some(USER));
+        assert!(js.j.is_none());
+        assert_eq!(recover_temp(&mut pc, &mut js), Recovery::Nothing);
+
+        // Restarted since: Windows already shows the user's values again.
+        let _ = begin_temp(&mut pc, &mut js, 0);
+        pc.cur = Some(USER);
+        let n = pc.writes.len();
+        assert_eq!(recover_temp(&mut pc, &mut js), Recovery::NotNeeded);
+        assert_eq!(pc.writes.len(), n, "nothing written");
+        assert!(js.j.is_none());
+
+        // Unreadable now: keep the journal for later.
+        let _ = begin_temp(&mut pc, &mut js, 0);
+        pc.cur = None;
+        assert!(matches!(recover_temp(&mut pc, &mut js), Recovery::Failed(_)));
+        assert!(js.j.is_some());
+    }
+
+    #[test]
+    fn journal_and_label_json() {
+        let j = TempJournal { previous: USER, applied: MouseParams::NEUTRAL, saved_unix: 9 };
+        let s = serde_json::to_string(&j).unwrap();
+        assert_eq!(serde_json::from_str::<TempJournal>(&s).unwrap(), j);
+        let p = serde_json::to_string(&PointerDuringTest::TemporarilyNeutral).unwrap();
+        assert_eq!(serde_json::from_str::<PointerDuringTest>(&p).unwrap(), PointerDuringTest::TemporarilyNeutral);
     }
 }

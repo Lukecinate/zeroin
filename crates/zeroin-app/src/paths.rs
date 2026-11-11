@@ -61,3 +61,8 @@ pub fn find_model() -> Option<PathBuf> {
 pub fn mouse_backup_file() -> PathBuf {
     data_dir().join("mouse-backup.json")
 }
+
+/// Pointer settings to put back after a test that used temporary neutral values.
+pub fn mouse_temp_file() -> PathBuf {
+    data_dir().join("mouse-temp.json")
+}
