@@ -219,6 +219,9 @@ pub struct Settings {
     /// Temporary neutral Windows pointer settings during tests:
     /// `None` asks before each test, `Some(true)` always, `Some(false)` never.
     pub temp_mouse: Option<bool>,
+    /// Interface scale in percent (90–150); `None` scales automatically
+    /// from the display's DPI setting and the window size.
+    pub ui_scale: Option<u32>,
 }
 
 impl Default for Settings {
@@ -236,6 +239,7 @@ impl Default for Settings {
             gear: Gear::default(),
             gear_lookup: false,
             temp_mouse: None,
+            ui_scale: None,
         }
     }
 }
@@ -448,6 +452,7 @@ mod tests {
         assert!(st.gear.is_empty());
         assert!(!st.gear_lookup, "gear lookup is off unless turned on");
         assert_eq!(st.temp_mouse, None, "older settings ask before the test");
+        assert_eq!(st.ui_scale, None, "older settings scale automatically");
         let st2: Settings = serde_json::from_str("{\"gear\": {\"feet\": \"ptfe\"}}").unwrap();
         assert_eq!(st2.gear.feet, Some(Feet::Ptfe));
     }

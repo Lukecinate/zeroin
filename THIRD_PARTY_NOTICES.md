@@ -64,6 +64,8 @@ list of about twenty USB vendor IDs common on gaming mice (vendor IDs are
 assigned by the USB Implementers Forum and reported by the devices
 themselves). It is not derived from the `usb.ids` database. Device names shown
 in Check mouse are the strings the connected device reports about itself.
+The Rapoo entry (0x24AE) was added in 0.2.2 from a connected device whose own
+HID strings identify it as a Rapoo product.
 
 EloShapes is only linked: Check mouse can open https://www.eloshapes.com/mouse/browse
 in the browser. No EloShapes data is fetched, stored or bundled.

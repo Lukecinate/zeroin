@@ -93,7 +93,12 @@ A block's data is not used, and the block runs again, when:
 - the app stuttered: one frame over 250 ms, or three over 100 ms, while a
   drill was running;
 - mouse input stopped for over 250 ms in the middle of a fast movement
-  (hand speed above 25 % of the trial's peak on both sides of the gap);
+  (0.2.2 rule): before the gap the view was 10–90 % of the way to the
+  target and had not yet stopped, the trial's peak hand speed was at least
+  60 °/s and the speed just before the gap was above 25 % of it; and within
+  60 ms after the gap the hand was that fast again. Hand speed is measured
+  over 8 ms of arrival time, so reports delivered in a burst do not inflate
+  it. A reaction pause before a flick is not a gap;
 - more than two clicks were anticipations, or more than three targets timed
   out;
 - polling was chaotic (0.2.1, Raw Input only): the robust spread of report

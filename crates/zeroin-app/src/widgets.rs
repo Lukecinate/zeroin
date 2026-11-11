@@ -129,7 +129,7 @@ pub fn secondary_button(ui: &mut Ui, motion: &mut Motion, label: &str, icon_opt:
 
 /// Selectable full-width option with a number-key badge.
 pub fn option_card(ui: &mut Ui, motion: &mut Motion, id: Id, key: Option<&str>, title: &str, subtitle: &str, selected: bool) -> Response {
-    let w = ui.available_width().min(560.0);
+    let w = ui.available_width();
     option_card_w(ui, motion, id, key, title, subtitle, "", selected, w)
 }
 
@@ -146,25 +146,32 @@ pub fn option_card_w(
     selected: bool,
     w: f32,
 ) -> Response {
-    let h = if subtitle.is_empty() { 52.0 } else { 64.0 };
+    let w = w.min(ui.available_width());
+    // Text wraps inside the card, so long labels never run past its edge.
+    let text_x = 16.0 + if key.is_some() { 38.0 } else { 0.0 };
+    let right_room = if tag.is_empty() { 44.0 } else { 44.0 + ui.painter().layout_no_wrap(tag.to_string(), regular(11.5), WARN).size().x };
+    let wrap = (w - text_x - right_room).max(60.0);
+    let tg = ui.painter().layout(title.to_string(), semibold(15.0), TEXT, wrap);
+    let sg = (!subtitle.is_empty()).then(|| ui.painter().layout(subtitle.to_string(), regular(12.5), TEXT_DIM, wrap));
+    let text_h = tg.size().y + sg.as_ref().map(|g| g.size().y + 3.0).unwrap_or(0.0);
+    let h = (text_h + 24.0).max(if subtitle.is_empty() { 52.0 } else { 64.0 });
     let (rect, resp) = ui.allocate_exact_size(egui::vec2(w, h), Sense::click());
     let hover = motion.bool(id.with("h"), resp.hovered());
     let sel = motion.bool(id.with("s"), selected);
     let p = ui.painter();
     p.rect_filled(rect, radius(R_CTRL), lerp_color(SURFACE, SURFACE_HI, hover.max(sel * 0.6)));
     p.rect_stroke(rect, radius(R_CTRL), Stroke::new(1.0 + sel * 0.5, lerp_color(BORDER, CORAL, sel)), StrokeKind::Inside);
-    let mut x = rect.left() + 16.0;
     if let Some(k) = key {
-        let badge = Rect::from_min_size(Pos2::new(x, rect.center().y - 12.0), Vec2::splat(24.0));
+        let badge = Rect::from_min_size(Pos2::new(rect.left() + 16.0, rect.center().y - 12.0), Vec2::splat(24.0));
         p.rect_filled(badge, radius(6), lerp_color(SURFACE_HI, CORAL, sel));
         p.text(badge.center(), Align2::CENTER_CENTER, k, semibold(12.0), lerp_color(TEXT_DIM, INK, sel));
-        x += 38.0;
     }
-    if subtitle.is_empty() {
-        p.text(Pos2::new(x, rect.center().y), Align2::LEFT_CENTER, title, semibold(15.0), TEXT);
-    } else {
-        p.text(Pos2::new(x, rect.center().y - 10.0), Align2::LEFT_CENTER, title, semibold(15.0), TEXT);
-        p.text(Pos2::new(x, rect.center().y + 11.0), Align2::LEFT_CENTER, subtitle, regular(12.5), TEXT_DIM);
+    let mut y = rect.center().y - text_h / 2.0;
+    let th = tg.size().y;
+    p.galley(Pos2::new(rect.left() + text_x, y), tg, TEXT);
+    y += th + 3.0;
+    if let Some(g) = sg {
+        p.galley(Pos2::new(rect.left() + text_x, y), g, TEXT_DIM);
     }
     if !tag.is_empty() && sel < 0.5 {
         p.text(Pos2::new(rect.right() - 16.0, rect.center().y), Align2::RIGHT_CENTER, tag, regular(11.5), WARN);
@@ -185,8 +192,8 @@ pub fn chip_row(ui: &mut Ui, motion: &mut Motion, id: Id, labels: &[String], sel
 pub fn chip_row_from(ui: &mut Ui, motion: &mut Motion, id: Id, labels: &[String], selected: Option<usize>, first: usize) -> Option<usize> {
     let mut clicked = None;
     let mut rects = Vec::new();
-    ui.horizontal(|ui| {
-        ui.spacing_mut().item_spacing.x = 8.0;
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing = egui::vec2(8.0, 8.0);
         // In right-to-left parents, add in reverse so chips still read left to right.
         let rtl = ui.layout().prefer_right_to_left();
         let order: Vec<usize> = if rtl { (0..labels.len()).rev().collect() } else { (0..labels.len()).collect() };
@@ -293,18 +300,48 @@ pub fn toggle(ui: &mut Ui, motion: &mut Motion, id: Id, on: &mut bool, enabled: 
 }
 
 /// Settings row: title + description on the left, control on the right.
+///
+/// Side by side when there is room ([`SETTING_ROW_WIDE`]); otherwise the
+/// control goes under the text, so nothing is pushed past the edge.
 pub fn setting_row(ui: &mut Ui, title: &str, desc: &str, control: impl FnOnce(&mut Ui)) {
-    ui.horizontal(|ui| {
-        let w = ui.available_width();
-        ui.allocate_ui_with_layout(egui::vec2((w - 160.0).max(200.0), 48.0), egui::Layout::top_down(egui::Align::Min), |ui| {
-            ui.spacing_mut().item_spacing.y = 2.0;
-            ui.label(egui::RichText::new(title).font(semibold(15.0)).color(TEXT));
-            if !desc.is_empty() {
-                ui.label(egui::RichText::new(desc).font(regular(13.0)).color(TEXT_DIM));
-            }
+    let w = ui.available_width();
+    let text = |ui: &mut Ui| {
+        ui.spacing_mut().item_spacing.y = 2.0;
+        ui.label(egui::RichText::new(title).font(semibold(15.0)).color(TEXT));
+        if !desc.is_empty() {
+            ui.label(egui::RichText::new(desc).font(regular(13.0)).color(TEXT_DIM));
+        }
+    };
+    if w >= SETTING_ROW_WIDE {
+        let control_w = SETTING_CONTROL_W.min(w * 0.5);
+        ui.horizontal(|ui| {
+            ui.allocate_ui_with_layout(egui::vec2(w - control_w - 16.0, 0.0), egui::Layout::top_down(egui::Align::Min), text);
+            ui.allocate_ui_with_layout(egui::vec2(ui.available_width(), 44.0), egui::Layout::right_to_left(egui::Align::Center), control);
         });
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), control);
-    });
+    } else {
+        ui.vertical(|ui| {
+            text(ui);
+            ui.add_space(4.0);
+            ui.horizontal_wrapped(control);
+        });
+    }
+}
+
+/// Width from which [`setting_row`] puts the control beside the text.
+pub const SETTING_ROW_WIDE: f32 = 700.0;
+/// Room reserved for a control beside the text.
+pub const SETTING_CONTROL_W: f32 = 420.0;
+
+/// Widest page column, in points.
+pub const PAGE_MAX_W: f32 = 860.0;
+
+/// Left edge and width of the centred page column inside an area that
+/// starts at `left` and is `width` wide: side margins of 5 % (20–56 pt),
+/// at most [`PAGE_MAX_W`] wide, centred in what is left.
+pub fn page_column(left: f32, width: f32) -> (f32, f32) {
+    let pad = (width * 0.05).clamp(20.0, 56.0);
+    let w = (width - 2.0 * pad).clamp(1.0, PAGE_MAX_W);
+    (left + (width - w) / 2.0, w)
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -326,7 +363,7 @@ pub fn notice(ui: &mut Ui, tone: Tone, title: &str, body: &str) {
         .corner_radius(radius(R_CTRL))
         .inner_margin(egui::Margin::symmetric(14, 12))
         .show(ui, |ui| {
-            ui.set_max_width(ui.available_width().min(620.0));
+            ui.set_max_width(ui.available_width() - 2.0);
             ui.horizontal_top(|ui| {
                 icon(ui, ic, 18.0, col);
                 ui.vertical(|ui| {
@@ -341,12 +378,18 @@ pub fn notice(ui: &mut Ui, tone: Tone, title: &str, body: &str) {
 }
 
 pub fn card<R>(ui: &mut Ui, add: impl FnOnce(&mut Ui) -> R) -> R {
+    // Inner width leaves room for the margins and the 1 pt border, so a card
+    // whose content fills it never sticks out of the column.
+    let inner = (ui.available_width() - 42.0).max(40.0);
     egui::Frame::new()
         .fill(SURFACE)
         .stroke(Stroke::new(1.0, BORDER))
         .corner_radius(radius(R_CARD))
         .inner_margin(egui::Margin::same(20))
-        .show(ui, add)
+        .show(ui, |ui| {
+            ui.set_max_width(inner);
+            add(ui)
+        })
         .inner
 }
 
@@ -385,7 +428,7 @@ pub fn speed_slider(ui: &mut Ui, motion: &mut Motion, id: Id, value: &mut u32) -
 
 /// Key hint text like "Enter  Next".
 pub fn key_hint(ui: &mut Ui, keys: &[(&str, &str)]) {
-    ui.horizontal(|ui| {
+    ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().item_spacing.x = 6.0;
         for (k, label) in keys {
             let g = ui.painter().layout_no_wrap(k.to_string(), semibold(11.0), TEXT_DIM);
@@ -396,4 +439,30 @@ pub fn key_hint(ui: &mut Ui, keys: &[(&str, &str)]) {
             ui.add_space(8.0);
         }
     });
+}
+
+/// Label / value rows that wrap: two columns when there is room, otherwise
+/// each value under its label.
+pub fn kv_rows(ui: &mut Ui, rows: &[(&str, String)]) {
+    let w = ui.available_width();
+    let two = w >= 520.0;
+    for (k, v) in rows {
+        if two {
+            let kw = (w * 0.5).min(320.0);
+            ui.horizontal_top(|ui| {
+                ui.allocate_ui_with_layout(egui::vec2(kw, 0.0), egui::Layout::top_down(egui::Align::Min), |ui| {
+                    ui.set_width(kw);
+                    ui.label(egui::RichText::new(*k).color(TEXT_DIM));
+                });
+                ui.vertical(|ui| {
+                    ui.label(egui::RichText::new(v).font(semibold(14.0)));
+                });
+            });
+        } else {
+            ui.spacing_mut().item_spacing.y = 2.0;
+            ui.label(egui::RichText::new(*k).color(TEXT_DIM));
+            ui.label(egui::RichText::new(v).font(semibold(14.0)));
+            ui.add_space(6.0);
+        }
+    }
 }

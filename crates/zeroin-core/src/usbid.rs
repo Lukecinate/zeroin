@@ -116,6 +116,8 @@ pub const VENDORS: &[Vendor] = &[
     Vendor { vid: 0x1B1C, name: "Corsair", kind: Brand },
     Vendor { vid: 0x1BCF, name: "Sunplus Innovation", kind: ChipMaker },
     Vendor { vid: 0x1E7D, name: "ROCCAT", kind: Brand },
+    // Seen on a user's Rapoo mouse whose HID strings read "Rapoo" (Nov 2026).
+    Vendor { vid: 0x24AE, name: "Rapoo", kind: Brand },
     Vendor { vid: 0x2516, name: "Cooler Master", kind: Brand },
     Vendor { vid: 0x258A, name: "Sinowealth", kind: ChipMaker },
     Vendor { vid: 0x3367, name: "Endgame Gear", kind: Brand },
@@ -171,6 +173,7 @@ mod tests {
         assert_eq!(vendor(0x1532).unwrap().name, "Razer");
         assert_eq!(vendor(0x258A).unwrap().kind, VendorKind::ChipMaker);
         assert!(vendor(0xFFFF).is_none());
+        assert_eq!(vendor(0x24AE).unwrap().name, "Rapoo");
     }
 
     #[test]

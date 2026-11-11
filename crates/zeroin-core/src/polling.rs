@@ -8,76 +8,153 @@ pub const STANDARD_RATES: [u32; 7] = [125, 250, 500, 1000, 2000, 4000, 8000];
 /// Result of analysing a burst of motion reports.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct PollingStats {
-    /// Measured reports per second while moving.
+    /// Reports per second while the mouse moves fast enough to fill every poll.
     pub rate_hz: f64,
     /// Closest standard rate, if within 30 %.
     pub nominal_hz: Option<u32>,
-    /// Share of intervals within ±50 % of the mean interval (0–1).
+    /// Share of fast-movement windows whose report count is within ±8 % of the rate (0–1).
     pub stability: f64,
-    /// Number of intervals analysed.
+    /// Number of reports analysed.
     pub samples: usize,
 }
 
 impl PollingStats {
-    /// A rate is considered stable when at least 80 % of intervals are close to the mean.
+    /// A rate is considered stable when at least 80 % of fast windows are close to it.
     pub fn is_stable(&self) -> bool {
         self.stability >= 0.8
     }
 }
 
-/// Minimum intervals needed for a reading.
+/// Minimum reports in fast windows needed for a reading.
 pub const MIN_SAMPLES: usize = 200;
+/// Window length for the live meter.
+const METER_WINDOW_US: u64 = 100_000;
+/// Fast windows needed for a reading (half a second of fast movement).
+const METER_MIN_WINDOWS: usize = 5;
 
 /// Analyse timestamps (µs, ascending) of consecutive motion reports from one device.
-/// Gaps over 20 ms are treated as pauses and ignored.
+///
+/// A mouse only sends a report when it has moved, so slow movement leaves
+/// polls empty and the plain mean interval reads low (a 1000 Hz mouse moved
+/// slowly can average 700 Hz). The arrival times are also bunched when
+/// Windows delivers several reports at once. So reports are counted in
+/// 100 ms windows (gaps over 20 ms split them), and the rate is the pooled
+/// count of the windows with at least 80 % of the 90th-percentile count,
+/// that is, while the hand moved fast enough to fill every poll.
 pub fn analyze(timestamps_us: &[u64]) -> Option<PollingStats> {
-    let intervals: Vec<f64> = timestamps_us.windows(2).map(|w| w[1].saturating_sub(w[0]) as f64).filter(|&d| d < 20_000.0).collect();
-    if intervals.len() < MIN_SAMPLES {
+    let mut counts: Vec<u32> = Vec::new();
+    let mut it = timestamps_us.iter().copied();
+    let first = it.next()?;
+    let (mut prev, mut win_start, mut n) = (first, first, 0u32);
+    for t in it {
+        if t.saturating_sub(prev) > 20_000 {
+            // Pause: drop the partial window and start again here.
+            win_start = t;
+            n = 0;
+        } else {
+            while t > win_start + METER_WINDOW_US {
+                counts.push(n);
+                n = 0;
+                win_start += METER_WINDOW_US;
+            }
+            n += 1;
+        }
+        prev = t;
+    }
+    if counts.len() < METER_MIN_WINDOWS {
         return None;
     }
-    let mean = intervals.iter().sum::<f64>() / intervals.len() as f64;
-    if mean <= 0.0 {
+    let mut sorted = counts.clone();
+    sorted.sort_unstable();
+    let p90 = sorted[((sorted.len() - 1) as f64 * 0.9).round() as usize];
+    let fast: Vec<u32> = counts.into_iter().filter(|&c| c > 0 && c as f64 >= 0.8 * p90 as f64).collect();
+    let total: u32 = fast.iter().sum();
+    if fast.len() < METER_MIN_WINDOWS || (total as usize) < MIN_SAMPLES {
         return None;
     }
-    let rate = 1e6 / mean;
-    let close = intervals.iter().filter(|&&d| (d - mean).abs() <= 0.5 * mean).count();
+    let per_window = total as f64 / fast.len() as f64;
+    let rate = per_window * 1e6 / METER_WINDOW_US as f64;
+    let close = fast.iter().filter(|&&c| (c as f64 - per_window).abs() <= 0.08 * per_window).count();
     let nominal = STANDARD_RATES
         .iter()
         .copied()
-        .min_by(|a, b| ((*a as f64 - rate).abs()).partial_cmp(&(*b as f64 - rate).abs()).unwrap())
+        .min_by(|a, b| ((*a as f64 - rate).abs()).total_cmp(&(*b as f64 - rate).abs()))
         .filter(|n| (*n as f64 - rate).abs() / (*n as f64) <= 0.3);
-    Some(PollingStats { rate_hz: rate, nominal_hz: nominal, stability: close as f64 / intervals.len() as f64, samples: intervals.len() })
+    Some(PollingStats { rate_hz: rate, nominal_hz: nominal, stability: close as f64 / fast.len() as f64, samples: total as usize })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// Timestamps for `secs` seconds at `hz`, optionally with arrival bursts of `burst` reports.
+    fn stream(start: u64, hz: f64, secs: f64, burst: u64) -> Vec<u64> {
+        let n = (hz * secs) as u64;
+        let dt = 1e6 / hz;
+        (0..n).map(|i| start + (((i / burst) * burst) as f64 * dt) as u64).collect()
+    }
+
     #[test]
     fn detects_1000hz() {
-        let ts: Vec<u64> = (0..1000).map(|i| i * 1000 + (i % 3) * 50).collect();
+        let ts: Vec<u64> = (0..3000).map(|i| i * 1000 + (i % 3) * 50).collect();
         let s = analyze(&ts).unwrap();
         assert_eq!(s.nominal_hz, Some(1000));
         assert!(s.is_stable());
     }
 
     #[test]
+    fn slow_movement_does_not_read_low() {
+        // 1000 Hz mouse: fast stretches, and slow stretches where only every
+        // second or third poll has movement. The plain mean read ~750 Hz here.
+        let mut ts = Vec::new();
+        let mut t = 0u64;
+        for round in 0..6 {
+            for _ in 0..500 {
+                t += 1000;
+                ts.push(t);
+            }
+            for k in 0..400 {
+                t += if (k + round) % 3 == 0 { 3000 } else { 2000 };
+                ts.push(t);
+            }
+        }
+        let naive = 1e6 * (ts.len() - 1) as f64 / (ts[ts.len() - 1] - ts[0]) as f64;
+        assert!(naive < 800.0, "scenario reproduces the low reading ({naive:.0})");
+        let s = analyze(&ts).unwrap();
+        assert_eq!(s.nominal_hz, Some(1000));
+        assert!((s.rate_hz - 1000.0).abs() < 30.0, "{}", s.rate_hz);
+    }
+
+    #[test]
+    fn bunched_arrival_and_8000hz() {
+        // Windows hands over 8 reports at a time; the count per window is still right.
+        let s = analyze(&stream(0, 8000.0, 1.5, 8)).unwrap();
+        assert_eq!(s.nominal_hz, Some(8000));
+        let s = analyze(&stream(0, 125.0, 6.0, 1)).unwrap();
+        assert_eq!(s.nominal_hz, Some(125));
+    }
+
+    #[test]
     fn detects_8000hz_and_ignores_pauses() {
-        let mut ts: Vec<u64> = (0..800).map(|i| i * 125).collect();
+        let mut ts = stream(0, 8000.0, 0.4, 1);
         let last = *ts.last().unwrap();
-        ts.extend((0..800).map(|i| last + 500_000 + i * 125));
+        ts.extend(stream(last + 500_000, 8000.0, 0.4, 1));
         let s = analyze(&ts).unwrap();
         assert_eq!(s.nominal_hz, Some(8000));
     }
 
     #[test]
     fn unstable_is_flagged_and_short_is_none() {
-        let ts: Vec<u64> = (0..400u64)
-            .scan(0u64, |t, i| {
-                *t += if i % 2 == 0 { 200 } else { 1800 };
-                Some(*t)
-            })
-            .collect();
+        // Report rate wandering between 1000 and 820 Hz from window to window.
+        let mut ts = Vec::new();
+        let mut t = 0u64;
+        for w in 0..30 {
+            let dt = if w % 2 == 0 { 1220 } else { 1000 };
+            for _ in 0..(100_000 / dt) {
+                t += dt;
+                ts.push(t);
+            }
+        }
         assert!(!analyze(&ts).unwrap().is_stable());
         assert!(analyze(&[0, 1000, 2000]).is_none());
     }

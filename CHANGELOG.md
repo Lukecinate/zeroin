@@ -4,6 +4,23 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [0.2.2] - 2026-11-11
+
+### Fixed
+- **Pages could not scroll.** Every page was laid out at a fixed height inside the scroll area, so content below the window (Check mouse results, the lower Settings sections, long Result and History pages) could not be reached. All pages now go through one shared page wrapper: a centred column, text wrapping at its edge, and a vertical scroll area that scrolls with the mouse wheel, the scrollbar, Page Up / Page Down / Home / End, and brings a control focused with Tab into view.
+- **Text cut off on the right.** Long headings, chip rows (for example the seven polling-rate choices), settings rows, option cards, key hints and the Check mouse figures now wrap or stack instead of running past the window. Cards no longer stick out of the column by their border. The Keyboard check tiles shrink with the column, and two-column summaries (Ready to test, Same feel in other games) no longer break labels into single letters. History rows cut long text with "…" before it reaches the value on the right, and an expanded History row grows to fit its details.
+- **"Mouse input stopped" re-runs after a normal pause.** The dropped-input rule could fire when the hand settled a little after a click, paused to react to the new target (about 250 ms is a normal reaction time), and then flicked: the pre-pause speed was compared with a peak taken only from that small settling motion. A gap now counts only when the hand was moving fast in the middle of the way to the target (10–90 %, before the first stop, at least 60 °/s), with speed measured over 8 ms of arrival time so reports that Windows delivers in a burst cannot inflate it, and the hand must be that fast again within 60 ms after the gap. Real drop-outs mid-flick are still caught at 1000 and 8000 Hz.
+- **Footer polling rate read low.** The live meter averaged every interval under 20 ms, including slow movement where the mouse has nothing to report on many polls, so a 1000 Hz mouse could show about 740 Hz while Check mouse measured 998 Hz. It now counts reports in 100 ms windows and uses the windows where the hand moved fast enough to fill every poll, the same principle as Check mouse, over the last 3 s. Its stability figure is now the share of those windows with a steady count.
+
+### Added
+- **Scalable layout for 14" to 55" screens.** The page column is centred and at most 860 points wide. The interface follows the Windows display scale (DPI) and, on Auto, also the window size (from 85 % on small laptop windows to 200 % on a 4K TV at 100 % scale). Settings → Interface scale offers Auto, 90, 100, 110, 125 or 150 %; a fixed scale is lowered automatically if the window is too small for it. Drill geometry is computed from angles and the window size, so the scale never changes test results.
+- The app opens maximised. The smallest window is 760 × 480.
+- Dialogs scroll when the window is too short for them; their buttons stay in view below the scrolling part.
+- USB vendor table: Rapoo (0x24AE), from a device that reports itself as a Rapoo product.
+
+### Development
+- A debug-only layout harness (not in release builds) opens any screen with sample data, scrolls it to the end and reports content wider than the page column, used for the screenshot audit at 1366×768 (150 %), 1920×1080 (100 %) and 3840×2160 (200 %).
+
 ## [0.2.1] - 2026-11-11
 
 ### Added

@@ -46,11 +46,10 @@ impl KeyboardCheck {
 impl ZeroInApp {
     pub fn settings_screen(&mut self, ui: &mut egui::Ui) {
         widgets::heading(ui, "Settings", "");
-        let w = ui.available_width().min(680.0);
 
         widgets::caption(ui, "TEST");
         widgets::card(ui, |ui| {
-            ui.set_width(w);
+            ui.set_width(ui.available_width());
             widgets::setting_row(ui, "Test length", "Quick: 6 blocks, about 2.5 min. Standard: 9 blocks, about 4 min.", |ui| {
                 let labels = vec!["Quick".to_string(), "Standard".to_string()];
                 let sel = match self.settings.test_length {
@@ -78,7 +77,7 @@ impl ZeroInApp {
         widgets::caption(ui, "LOCAL AI");
         let status = self.llm_status();
         widgets::card(ui, |ui| {
-            ui.set_width(w);
+            ui.set_width(ui.available_width());
             let mut on = self.settings.ai_enabled;
             widgets::setting_row(ui, "Use the local AI model", "Writes a plain-language explanation of each result. It never picks test settings or changes a number. Runs on your CPU; nothing is sent anywhere.", |ui| {
                 if widgets::toggle(ui, &mut self.motion, crate::motion::id("ai_toggle"), &mut on, true).changed() {}
@@ -107,7 +106,7 @@ impl ZeroInApp {
 
         widgets::caption(ui, "DEVICES");
         widgets::card(ui, |ui| {
-            ui.set_width(w);
+            ui.set_width(ui.available_width());
             // Mouse
             let poll = match &self.polling.last {
                 Some(s) => format!(
@@ -170,7 +169,7 @@ impl ZeroInApp {
 
         widgets::caption(ui, "KEYBOARD CHECK (HALL-EFFECT / RAPID TRIGGER)");
         widgets::card(ui, |ui| {
-            ui.set_width(w);
+            ui.set_width(ui.available_width());
             let mut an = self.settings.analog_keyboard_enabled;
             widgets::setting_row(
                 ui,
@@ -196,10 +195,12 @@ impl ZeroInApp {
             }
             widgets::dim(ui, "Press and release W A S D quickly. Rapid-trigger boards re-press in a few milliseconds.");
             ui.add_space(6.0);
-            let (rect, _) = ui.allocate_exact_size(egui::vec2(w.min(520.0), 92.0), egui::Sense::hover());
+            // Four tiles that shrink with the column (at most 116 points each).
+            let (rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width().min(500.0), 92.0), egui::Sense::hover());
+            let step = rect.width() / 4.0;
             let names = ["W", "A", "S", "D"];
             for i in 0..4 {
-                let r = Rect::from_min_size(Pos2::new(rect.left() + i as f32 * 128.0, rect.top()), egui::vec2(116.0, 88.0));
+                let r = Rect::from_min_size(Pos2::new(rect.left() + i as f32 * step, rect.top()), egui::vec2(step - 12.0, 88.0));
                 let down = self.keyboard_down(i);
                 let t = self.motion.value(crate::motion::id(("key", i)), if down { 1.0 } else { 0.0 });
                 ui.painter().rect_filled(r, radius(R_CTRL), crate::motion::lerp_color(SURFACE_HI, CORAL_DIM, t));
@@ -235,7 +236,24 @@ impl ZeroInApp {
 
         widgets::caption(ui, "INTERFACE AND DATA");
         widgets::card(ui, |ui| {
-            ui.set_width(w);
+            ui.set_width(ui.available_width());
+            widgets::setting_row(
+                ui,
+                "Interface scale",
+                "Auto follows your Windows display scale and the window size. Drills and results are not affected.",
+                |ui| {
+                    let mut labels = vec!["Auto".to_string()];
+                    labels.extend(crate::layout::SCALE_CHOICES.iter().map(|p| format!("{p}%")));
+                    let sel = match self.settings.ui_scale {
+                        None => Some(0),
+                        Some(p) => crate::layout::SCALE_CHOICES.iter().position(|c| *c == p).map(|i| i + 1),
+                    };
+                    if let Some(i) = widgets::chip_row(ui, &mut self.motion, crate::motion::id("scale_chips"), &labels, sel) {
+                        self.settings.ui_scale = if i == 0 { None } else { Some(crate::layout::SCALE_CHOICES[i - 1]) };
+                        self.save_settings();
+                    }
+                },
+            );
             let mut rm = self.settings.reduce_motion;
             widgets::setting_row(ui, "Reduce motion", "Turn off interface animation. Drills never animate.", |ui| {
                 widgets::toggle(ui, &mut self.motion, crate::motion::id("rm_toggle"), &mut rm, true);
@@ -268,7 +286,7 @@ impl ZeroInApp {
         ui.add_space(12.0);
         widgets::caption(ui, "ABOUT");
         widgets::card(ui, |ui| {
-            ui.set_width(w);
+            ui.set_width(ui.available_width());
             ui.label(egui::RichText::new(format!("ZeroIn {}", env!("CARGO_PKG_VERSION"))).font(semibold(15.0)));
             widgets::dim(ui, "MIT License · Windows 10 and 11 · Fully local: no accounts, no telemetry; the app makes no network connections. Links open in your browser only when you click them.");
             widgets::dim(

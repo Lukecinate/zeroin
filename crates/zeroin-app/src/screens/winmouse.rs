@@ -194,32 +194,41 @@ impl ZeroInApp {
             .inner_margin(egui::Margin::same(24));
         let resp = egui::Modal::new(crate::motion::id("win_mouse_modal")).frame(frame).show(ctx, |ui| {
             ui.set_width(460.0);
-            ui.label(egui::RichText::new(title).font(bold(20.0)).color(TEXT));
-            ui.add_space(6.0);
-            widgets::dim(ui, "Changes the mouse settings for your Windows account. No admin rights are needed.");
-            ui.add_space(14.0);
-            egui::Grid::new(crate::motion::id("win_mouse_grid")).num_columns(4).spacing([14.0, 10.0]).show(ui, |ui| {
-                let list = changes(from, to);
-                if list.is_empty() {
-                    ui.label(egui::RichText::new("No differences").color(TEXT_DIM));
-                    ui.end_row();
-                }
-                for c in list {
-                    ui.label(egui::RichText::new(c.label).font(semibold(14.0)).color(TEXT));
-                    ui.label(egui::RichText::new(c.from).color(TEXT_DIM));
-                    ui.label(egui::RichText::new("→").color(TEXT_DIM));
-                    ui.label(egui::RichText::new(c.to).font(semibold(14.0)).color(CORAL));
-                    ui.end_row();
+            // Short windows: the dialog scrolls instead of running off screen.
+            // The buttons stay below the scrolling part, always in view.
+            let max_h = (ui.ctx().content_rect().height() - 96.0 - 48.0 - 90.0).max(120.0);
+            ui.spacing_mut().scroll = egui::style::ScrollStyle::solid();
+            egui::ScrollArea::vertical().max_height(max_h).min_scrolled_height(max_h).show(ui, |ui| {
+                ui.label(egui::RichText::new(title).font(bold(20.0)).color(TEXT));
+                ui.add_space(6.0);
+                widgets::dim(ui, "Changes the mouse settings for your Windows account. No admin rights are needed.");
+                ui.add_space(14.0);
+                ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
+                egui::Grid::new(crate::motion::id("win_mouse_grid")).num_columns(4).spacing([14.0, 10.0]).show(ui, |ui| {
+                    let list = changes(from, to);
+                    if list.is_empty() {
+                        ui.label(egui::RichText::new("No differences").color(TEXT_DIM));
+                        ui.end_row();
+                    }
+                    for c in list {
+                        ui.label(egui::RichText::new(c.label).font(semibold(14.0)).color(TEXT));
+                        ui.label(egui::RichText::new(c.from).color(TEXT_DIM));
+                        ui.label(egui::RichText::new("→").color(TEXT_DIM));
+                        ui.label(egui::RichText::new(c.to).font(semibold(14.0)).color(CORAL));
+                        ui.end_row();
+                    }
+                });
+                ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Wrap);
+                ui.add_space(14.0);
+                if matches!(p, Pending::Apply { .. }) {
+                    widgets::dim(ui, "Your current values are saved first, so Restore previous (here or in Settings) can undo this.");
+                    ui.add_space(4.0);
+                    widgets::dim(ui, "In-game sensitivity is not changed; games keep it in their own settings.");
+                    ui.add_space(14.0);
                 }
             });
-            ui.add_space(14.0);
-            if matches!(p, Pending::Apply { .. }) {
-                widgets::dim(ui, "Your current values are saved first, so Restore previous (here or in Settings) can undo this.");
-                ui.add_space(4.0);
-                widgets::dim(ui, "In-game sensitivity is not changed; games keep it in their own settings.");
-                ui.add_space(14.0);
-            }
-            ui.horizontal(|ui| {
+            ui.add_space(6.0);
+            ui.horizontal_wrapped(|ui| {
                 if widgets::primary_button(ui, &mut self.motion, action, true).clicked() {
                     confirm = true;
                 }

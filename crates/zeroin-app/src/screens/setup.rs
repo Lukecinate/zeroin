@@ -24,6 +24,12 @@ pub enum SetupStep {
 }
 
 impl SetupStep {
+    /// Step by position (0 = Game); out of range gives the last step.
+    #[cfg(all(debug_assertions, not(windows)))]
+    pub fn from_index(i: usize) -> SetupStep {
+        Self::ALL[i.min(Self::ALL.len() - 1)]
+    }
+
     const ALL: [SetupStep; 8] = [
         SetupStep::Game,
         SetupStep::Dpi,
@@ -205,7 +211,7 @@ impl ZeroInApp {
                 let mut resume = false;
                 let mut discard = false;
                 widgets::card(ui, |ui| {
-                    ui.set_width(ui.available_width().min(620.0));
+                    ui.set_width(ui.available_width());
                     ui.label(egui::RichText::new("Unfinished test").font(semibold(15.0)));
                     widgets::dim(
                         ui,
@@ -249,7 +255,7 @@ impl ZeroInApp {
                     "Which game are you tuning for?",
                     "Each game turns a different amount per mouse count, so ZeroIn needs to know.",
                 );
-                let total = ui.available_width().min(720.0);
+                let total = ui.available_width();
                 let cw = (total - 10.0) / 2.0;
                 let mut picked = None;
                 let mut dbl = false;
@@ -718,7 +724,8 @@ Raw-input games and ZeroIn's drills ignore this setting.",
         let p = self.setup.profile();
         let (dpi, sens) = (self.setup.dpi().unwrap_or(800.0), self.setup.sens().unwrap_or(1.0));
         widgets::card(ui, |ui| {
-            ui.set_width(ui.available_width().min(620.0));
+            ui.set_width(ui.available_width());
+            ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
             egui::Grid::new("summary").num_columns(2).spacing([28.0, 8.0]).show(ui, |ui| {
                 let row = |ui: &mut egui::Ui, k: &str, v: String| {
                     ui.label(egui::RichText::new(k).color(TEXT_DIM));
@@ -765,10 +772,14 @@ Raw-input games and ZeroIn's drills ignore this setting.",
                         ui,
                         Tone::Ok,
                         &format!("Mouse polling: {name}"),
-                        &format!("Measured {:.0} reports/s, {:.0}% of intervals steady.", s.rate_hz, s.stability * 100.0),
+                        &format!(
+                            "Measured {:.0} reports/s while moving fast; {:.0}% of 100 ms windows steady.",
+                            s.rate_hz,
+                            s.stability * 100.0
+                        ),
                     );
                 } else {
-                    widgets::notice(ui, Tone::Warn, &format!("Mouse polling: {name}, unstable"), &format!("Only {:.0}% of intervals were steady. Try another USB port (directly on the PC), close RGB/mouse software overlays, or lower the polling rate. 4000–8000 Hz needs a fast CPU.", s.stability * 100.0));
+                    widgets::notice(ui, Tone::Warn, &format!("Mouse polling: {name}, unstable"), &format!("Only {:.0}% of 100 ms windows had a steady report count. Try another USB port (directly on the PC), close RGB/mouse software overlays, or lower the polling rate. 4000–8000 Hz needs a fast CPU.", s.stability * 100.0));
                 }
             }
             (None, true) => {

@@ -103,7 +103,15 @@ impl ZeroInApp {
         let mut toggle: Option<String> = None;
         let mut delete: Option<String> = None;
         let mut ask: Option<String> = None;
-        let w = ui.available_width().min(680.0);
+        let w = ui.available_width();
+        #[cfg(all(debug_assertions, not(windows)))]
+        let open_id = match self.dev_open_history_row.take() {
+            Some(id) => {
+                ui.ctx().data_mut(|d| d.insert_temp(crate::motion::id("hist_open"), id.clone()));
+                Some(id)
+            }
+            None => open_id,
+        };
         for s in self.history.sessions.iter().rev() {
             let pad = zeroin_core::history::pad_label(s);
             if let Some(f) = &pad_filter {
@@ -118,17 +126,21 @@ impl ZeroInApp {
             ui.painter().rect_filled(rect, radius(R_CTRL), crate::motion::lerp_color(SURFACE, SURFACE_HI, hover.max(t * 0.5)));
             ui.painter().rect_stroke(rect, radius(R_CTRL), Stroke::new(1.0, BORDER), StrokeKind::Inside);
             let dec = s.game.decimals as usize;
-            ui.painter().text(rect.left_center() + egui::vec2(18.0, -11.0), Align2::LEFT_CENTER, &s.game.name, semibold(15.0), TEXT);
-            ui.painter().text(
-                rect.left_center() + egui::vec2(18.0, 12.0),
-                Align2::LEFT_CENTER,
-                match &pad {
+            // Left text is cut with "…" before it reaches the sensitivity on the right.
+            let left_w = (w - 18.0 - 170.0).max(80.0);
+            let name = elided(ui, &s.game.name, semibold(15.0), TEXT, left_w);
+            ui.painter().galley(rect.left_center() + egui::vec2(18.0, -11.0 - name.size().y / 2.0), name, TEXT);
+            let sub = elided(
+                ui,
+                &match &pad {
                     Some(p) => format!("{} · {:.0} DPI · {p}", format_date(s.created_unix), s.dpi),
                     None => format!("{} · {:.0} DPI", format_date(s.created_unix), s.dpi),
                 },
                 regular(12.5),
                 TEXT_DIM,
+                left_w,
             );
+            ui.painter().galley(rect.left_center() + egui::vec2(18.0, 12.0 - sub.size().y / 2.0), sub, TEXT_DIM);
             ui.painter().text(
                 rect.right_center() + egui::vec2(-48.0, -9.0),
                 Align2::RIGHT_CENTER,
@@ -150,10 +162,13 @@ impl ZeroInApp {
             }
             resp.on_hover_cursor(egui::CursorIcon::PointingHand);
             if t > 0.01 {
-                let full_h = 230.0;
+                // Height of the details as laid out last frame, so long text is never cut off.
+                let hid = crate::motion::id(("hist_h_px", &s.id));
+                let full_h = ui.ctx().data(|d| d.get_temp::<f32>(hid)).unwrap_or(230.0);
                 let (area, _) = ui.allocate_exact_size(egui::vec2(w, full_h * t), Sense::hover());
-                let mut child = ui.new_child(egui::UiBuilder::new().max_rect(area.shrink2(egui::vec2(18.0, 6.0))));
-                child.set_clip_rect(area);
+                let inner = Rect::from_min_size(area.min + egui::vec2(18.0, 6.0), egui::vec2(w - 36.0, 4000.0));
+                let mut child = ui.new_child(egui::UiBuilder::new().max_rect(inner));
+                child.set_clip_rect(area.intersect(ui.clip_rect()));
                 child.set_opacity(t);
                 child.label(egui::RichText::new(&s.explanation).color(TEXT));
                 child.add_space(4.0);
@@ -197,6 +212,11 @@ impl ZeroInApp {
                         ask = Some(s.id.clone());
                     }
                 }
+                let measured = child.min_rect().height() + 14.0;
+                if (measured - full_h).abs() > 0.5 {
+                    ui.ctx().data_mut(|d| d.insert_temp(hid, measured));
+                    ui.ctx().request_repaint();
+                }
             }
             ui.add_space(6.0);
         }
@@ -221,6 +241,13 @@ impl ZeroInApp {
             ui.ctx().data_mut(|d| d.remove::<String>(crate::motion::id("hist_confirm")));
         }
     }
+}
+
+/// One line of text cut with "…" to fit `max_w`.
+fn elided(ui: &egui::Ui, text: &str, font: egui::FontId, color: egui::Color32, max_w: f32) -> std::sync::Arc<egui::Galley> {
+    let mut job = egui::text::LayoutJob::single_section(text.to_string(), egui::TextFormat::simple(font, color));
+    job.wrap = egui::text::TextWrapping::truncate_at_width(max_w);
+    ui.painter().layout_job(job)
 }
 
 #[cfg(test)]

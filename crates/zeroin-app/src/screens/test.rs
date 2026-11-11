@@ -284,7 +284,6 @@ impl ZeroInApp {
         let total = t.planned_blocks();
         let done = t.search.blocks_done().min(total);
         let block_no = (done + 1).min(total);
-        let w = ui.available_width().min(620.0);
         let mut start = false;
         let mut back = false;
 
@@ -338,7 +337,7 @@ impl ZeroInApp {
             ui.add_space(6.0);
         }
         widgets::card(ui, |ui| {
-            ui.set_width(w);
+            ui.set_width(ui.available_width());
             ui.horizontal(|ui| {
                 ui.label(egui::RichText::new(format!("{done} of {total} blocks done")).font(semibold(15.0)));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {

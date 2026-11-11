@@ -41,6 +41,7 @@ pub struct PollingMeter {
     device: Option<u64>,
     stamps: Vec<u64>,
     motion: Vec<(u64, i32, i32)>,
+    analysed_us: u64,
     pub last: Option<PollingStats>,
     /// Jitter while moving fast, the pre-test value for the block rule.
     pub baseline: Option<polling::Jitter>,
@@ -57,13 +58,17 @@ impl PollingMeter {
             }
             self.stamps.push(ev.t_us);
             self.motion.push((ev.t_us, dx, dy));
-            if self.stamps.len() > 4000 {
-                self.stamps.drain(..2000);
+            // Keep the last 3 s of reports (enough 100 ms windows at any rate).
+            let keep_from = ev.t_us.saturating_sub(3_000_000);
+            if self.stamps.len() > 64 && self.stamps[0] < keep_from {
+                let cut = self.stamps.partition_point(|&t| t < keep_from);
+                self.stamps.drain(..cut);
             }
             if self.motion.len() > 8000 {
                 self.motion.drain(..4000);
             }
-            if self.stamps.len().is_multiple_of(64) {
+            if ev.t_us.saturating_sub(self.analysed_us) >= 100_000 {
+                self.analysed_us = ev.t_us;
                 if let Some(s) = polling::analyze(&self.stamps) {
                     self.last = Some(s);
                 }
@@ -106,6 +111,24 @@ pub struct ZeroInApp {
     pub win_mouse: crate::screens::winmouse::WinMouseUi,
     pub temp_mouse: crate::screens::tempmouse::TempMouseUi,
     pub frame_times: std::collections::VecDeque<f64>,
+    /// Page scroll: last offset, viewport and content heights, a pending jump,
+    /// and the page it belongs to (a new page starts at the top).
+    scroll: PageScroll,
+    /// Widest content seen past the page column, for the layout check.
+    pub layout_overflow: Option<(String, f32)>,
+    /// Layout checks: open this History row on the next frame.
+    #[cfg(all(debug_assertions, not(windows)))]
+    pub dev_open_history_row: Option<String>,
+}
+
+#[derive(Default)]
+struct PageScroll {
+    offset: f32,
+    view_h: f32,
+    content_h: f32,
+    request: Option<f32>,
+    page: Option<(Section, Step, bool)>,
+    focus: Option<egui::Id>,
 }
 
 impl ZeroInApp {
@@ -166,8 +189,14 @@ impl ZeroInApp {
             win_mouse: crate::screens::winmouse::WinMouseUi::load(),
             temp_mouse: Default::default(),
             frame_times: Default::default(),
+            scroll: Default::default(),
+            layout_overflow: None,
+            #[cfg(all(debug_assertions, not(windows)))]
+            dev_open_history_row: None,
         };
         app.temp_mouse_startup();
+        #[cfg(all(debug_assertions, not(windows)))]
+        crate::screens::dev::startup(&mut app);
         app
     }
 
@@ -367,31 +396,120 @@ impl ZeroInApp {
         }
         let dx = self.motion.value(crate::motion::id("screen_x"), 0.0);
         let alpha = self.motion.value(crate::motion::id("screen_a"), 1.0).clamp(0.0, 1.0);
-        let full = ui.max_rect();
-        let inner = Rect::from_min_max(full.min + egui::vec2(48.0 + dx, 32.0), full.max - egui::vec2(48.0 - dx, 24.0));
-        let mut child = ui.new_child(egui::UiBuilder::new().max_rect(inner).layout(egui::Layout::top_down(egui::Align::Min)));
-        child.set_opacity(alpha);
+        // Every page goes through this one wrapper: a centred column of at
+        // most PAGE_MAX_W points, text wrapping at its edge, and a height
+        // that the surrounding scroll area can scroll through.
+        let area = ui.max_rect();
+        let (x, w) = widgets::page_column(area.left(), area.width());
+        let col = Rect::from_min_size(Pos2::new(x + dx, area.top() + 32.0), egui::vec2(w, (area.height() - 56.0).max(1.0)));
+        let r = ui.scope_builder(egui::UiBuilder::new().max_rect(col).layout(egui::Layout::top_down(egui::Align::Min)), |child| {
+            child.set_opacity(alpha);
+            child.set_max_width(w);
+            child.style_mut().wrap_mode = Some(egui::TextWrapMode::Wrap);
+            self.page(child);
+            child.add_space(24.0);
+        });
+        let over = r.response.rect.right() - (col.right() + 0.5);
+        if over > 0.0 && dx.abs() < 0.5 {
+            self.layout_overflow = Some((self.page_name(), over));
+        }
+    }
+
+    /// Name of the current page, for the layout check.
+    pub fn page_name(&self) -> String {
+        match self.section {
+            Section::Find => format!("find/{:?}", self.step),
+            Section::History => "history".into(),
+            Section::Settings if self.mouse_check.open => "settings/check-mouse".into(),
+            Section::Settings => "settings".into(),
+        }
+    }
+
+    fn page(&mut self, child: &mut egui::Ui) {
         match self.section {
             Section::Find => {
                 let reach = [true, self.test.is_some(), self.result.is_some()];
-                if let Some(i) = widgets::step_bar(&mut child, &mut self.motion, self.step.index(), reach) {
+                if let Some(i) = widgets::step_bar(child, &mut self.motion, self.step.index(), reach) {
                     self.step = [Step::Setup, Step::Test, Step::Result][i];
                 }
                 child.add_space(24.0);
                 match self.step {
-                    Step::Setup => self.setup_screen(&mut child),
-                    Step::Test => self.test_screen(&mut child),
-                    Step::Result => self.result_screen(&mut child),
+                    Step::Setup => self.setup_screen(child),
+                    Step::Test => self.test_screen(child),
+                    Step::Result => self.result_screen(child),
                 }
             }
-            Section::History => self.history_screen(&mut child),
+            Section::History => self.history_screen(child),
             Section::Settings => {
                 if self.mouse_check.open {
-                    self.mouse_check_screen(&mut child)
+                    self.mouse_check_screen(child)
                 } else {
-                    self.settings_screen(&mut child)
+                    self.settings_screen(child)
                 }
             }
+        }
+    }
+
+    /// Page Up / Page Down / Home / End scroll the page unless a text field
+    /// or dialog has the keyboard.
+    fn page_keys(&mut self, ctx: &egui::Context) {
+        if self.in_drill() || self.win_mouse.pending.is_some() || self.temp_mouse.prompt || ctx.egui_wants_keyboard_input() {
+            return;
+        }
+        let (pd, pu, home, end) = ctx.input_mut(|i| {
+            (
+                i.consume_key(egui::Modifiers::NONE, Key::PageDown),
+                i.consume_key(egui::Modifiers::NONE, Key::PageUp),
+                i.consume_key(egui::Modifiers::NONE, Key::Home),
+                i.consume_key(egui::Modifiers::NONE, Key::End),
+            )
+        });
+        let max = (self.scroll.content_h - self.scroll.view_h).max(0.0);
+        let step = (self.scroll.view_h * 0.85).max(40.0);
+        let y = self.scroll.offset;
+        let target = if pd {
+            Some(y + step)
+        } else if pu {
+            Some(y - step)
+        } else if home {
+            Some(0.0)
+        } else if end {
+            Some(max)
+        } else {
+            None
+        };
+        if let Some(t) = target {
+            self.scroll.request = Some(t.clamp(0.0, max));
+        }
+    }
+
+    /// Layout checks: scroll the page to `y` points on the next frame.
+    #[cfg(all(debug_assertions, not(windows)))]
+    pub fn scroll_to(&mut self, y: f32) {
+        self.scroll.request = Some(y.clamp(0.0, (self.scroll.content_h - self.scroll.view_h).max(0.0)));
+    }
+
+    /// Layout checks: scroll the page to its end.
+    #[cfg(all(debug_assertions, not(windows)))]
+    pub fn scroll_to_end(&mut self) {
+        self.scroll.request = Some((self.scroll.content_h - self.scroll.view_h).max(0.0));
+    }
+
+    /// Current scroll offset, viewport and content height.
+    #[cfg(all(debug_assertions, not(windows)))]
+    pub fn scroll_metrics(&self) -> (f32, f32, f32) {
+        (self.scroll.offset, self.scroll.view_h, self.scroll.content_h)
+    }
+
+    /// Interface zoom from the setting (Auto or 90–150 %) on top of the
+    /// display's DPI. Drill geometry is computed from angles and the window's
+    /// size, so the zoom never changes test math.
+    fn apply_zoom(&mut self, ctx: &egui::Context) {
+        let z_now = ctx.zoom_factor();
+        let size = ctx.content_rect().size() * z_now;
+        let z = crate::layout::zoom_for(self.settings.ui_scale, size.x, size.y);
+        if (z - z_now).abs() > 0.004 {
+            ctx.set_zoom_factor(z);
         }
     }
 
@@ -440,6 +558,8 @@ impl eframe::App for ZeroInApp {
         self.win_mouse_keys(&ctx);
         self.temp_mouse_keys(&ctx);
         self.global_keys(&ctx);
+        self.page_keys(&ctx);
+        self.apply_zoom(&ctx);
         self.update_vsync(frame);
 
         let full = ui.max_rect();
@@ -448,17 +568,38 @@ impl eframe::App for ZeroInApp {
             let mut child = ui.new_child(egui::UiBuilder::new().max_rect(full));
             self.drill_view(&mut child);
         } else {
-            let rail_w = 228.0;
+            let rail_w = crate::layout::rail_width(full.width());
             let rail_rect = Rect::from_min_max(full.min, Pos2::new(full.left() + rail_w, full.bottom()));
             let main_rect = Rect::from_min_max(Pos2::new(full.left() + rail_w, full.top()), full.max);
             let mut rail = ui.new_child(egui::UiBuilder::new().max_rect(rail_rect));
             self.rail(&mut rail);
             let mut main = ui.new_child(egui::UiBuilder::new().max_rect(main_rect));
-            egui::ScrollArea::vertical().auto_shrink([false, false]).show(&mut main, |ui| {
-                let r = ui.max_rect();
-                ui.set_min_height((main_rect.height() - 2.0).max(r.height()));
+            main.style_mut().spacing.scroll = egui::style::ScrollStyle::solid();
+            let page = Some((self.section, self.step, self.mouse_check.open));
+            let mut area = egui::ScrollArea::vertical().id_salt("page_scroll").auto_shrink([false, false]);
+            if page != self.scroll.page {
+                self.scroll.page = page;
+                self.scroll.request = None;
+                area = area.vertical_scroll_offset(0.0);
+            } else if let Some(y) = self.scroll.request.take() {
+                area = area.vertical_scroll_offset(y.max(0.0));
+            }
+            let out = area.show(&mut main, |ui| {
                 self.content(ui);
+                // Keyboard focus moved (Tab): bring the focused control into view.
+                let focus = ui.ctx().memory(|m| m.focused());
+                if focus != self.scroll.focus {
+                    self.scroll.focus = focus;
+                    if let Some(r) = focus.and_then(|id| ui.ctx().read_response(id)) {
+                        ui.scroll_to_rect(r.rect, None);
+                    }
+                }
             });
+            self.scroll.offset = out.state.clamped_offset().y;
+            self.scroll.view_h = out.inner_rect.height();
+            self.scroll.content_h = out.content_size.y;
+            #[cfg(all(debug_assertions, not(windows)))]
+            crate::screens::dev::after_frame(self, &ctx);
             // Keep the polling meter and keyboard check live on screens that show them.
             let live = (self.section == Section::Find && self.step == Step::Setup && self.setup.is_ready_step())
                 || self.section == Section::Settings;

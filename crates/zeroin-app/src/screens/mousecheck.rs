@@ -110,7 +110,7 @@ impl ZeroInApp {
             "Check mouse",
             "Measures the polling rate your mouse really delivers, from the reports Windows hands to ZeroIn. Nothing is sent anywhere.",
         );
-        let w = ui.available_width().min(760.0);
+        let w = ui.available_width();
 
         // Rate set in the mouse software.
         widgets::caption(ui, "RATE SET IN YOUR MOUSE SOFTWARE");
@@ -141,7 +141,7 @@ impl ZeroInApp {
             let elapsed = platform::now_us().saturating_sub(*started_us) as f64 / 1e6;
             let frac = (elapsed / CHECK_SECONDS).clamp(0.0, 1.0) as f32;
             widgets::card(ui, |ui| {
-                ui.set_width(w);
+                ui.set_width(ui.available_width());
                 ui.label(egui::RichText::new("Move the mouse quickly in wide circles").font(semibold(16.0)));
                 widgets::dim(ui, format!("{} reports so far · {:.1} s left", check.count(), (CHECK_SECONDS - elapsed).max(0.0)));
                 ui.add_space(8.0);
@@ -230,7 +230,7 @@ impl ZeroInApp {
         // Device identity.
         widgets::caption(ui, "DEVICE");
         widgets::card(ui, |ui| {
-            ui.set_width(w);
+            ui.set_width(ui.available_width());
             match &d.identity {
                 Some(id) => {
                     let ids = usbid::parse_device_path(&id.path);
@@ -325,33 +325,26 @@ impl ZeroInApp {
         // Figures.
         widgets::caption(ui, "MEASURED");
         widgets::card(ui, |ui| {
-            ui.set_width(w);
-            egui::Grid::new("poll_stats").num_columns(2).spacing([28.0, 6.0]).show(ui, |ui| {
-                let row = |ui: &mut egui::Ui, k: &str, v: String| {
-                    ui.label(egui::RichText::new(k).color(TEXT_DIM));
-                    ui.label(egui::RichText::new(v).font(semibold(14.0)));
-                    ui.end_row();
-                };
-                row(ui, "Effective rate (reports per second)", format!("{:.0} Hz", r.effective_hz));
-                row(
-                    ui,
-                    "Rate from median interval",
-                    r.interval_hz.map(|h| format!("{h:.0} Hz")).unwrap_or_else(|| "not measurable".into()),
-                );
-                row(ui, "Nearest standard rate", r.standard_hz.map(|h| format!("{h} Hz")).unwrap_or_else(|| "none within 12 %".into()));
-                row(ui, "Interval 1st / 99th percentile", format!("{} / {}", fmt_us(r.p1_us), fmt_us(r.p99_us)));
-                row(ui, "Jitter (std / MAD)", format!("{} / {}", fmt_us(r.std_us), fmt_us(r.mad_us)));
-                row(
-                    ui,
-                    "Skipped polls",
-                    r.skipped_frac
-                        .map(|s| format!("{:.1} %", s * 100.0))
-                        .unwrap_or_else(|| "not measurable (timing too uneven to tell skips from jitter)".into()),
-                );
-                row(ui, "Bunched reports (Windows batched)", format!("{:.1} % ({:.1} %)", r.bunched_frac * 100.0, r.batched_frac * 100.0));
-                row(ui, "Reports with only 1 count", format!("{:.0} %", r.low_count_frac * 100.0));
-                row(ui, "Rate stability over time (CV)", format!("{:.1} %", r.rate_cv * 100.0));
-            });
+            ui.set_width(ui.available_width());
+            widgets::kv_rows(
+                ui,
+                &[
+                    ("Effective rate (reports per second)", format!("{:.0} Hz", r.effective_hz)),
+                    ("Rate from median interval", r.interval_hz.map(|h| format!("{h:.0} Hz")).unwrap_or_else(|| "not measurable".into())),
+                    ("Nearest standard rate", r.standard_hz.map(|h| format!("{h} Hz")).unwrap_or_else(|| "none within 12 %".into())),
+                    ("Interval 1st / 99th percentile", format!("{} / {}", fmt_us(r.p1_us), fmt_us(r.p99_us))),
+                    ("Jitter (std / MAD)", format!("{} / {}", fmt_us(r.std_us), fmt_us(r.mad_us))),
+                    (
+                        "Skipped polls",
+                        r.skipped_frac
+                            .map(|s| format!("{:.1} %", s * 100.0))
+                            .unwrap_or_else(|| "not measurable (timing too uneven to tell skips from jitter)".into()),
+                    ),
+                    ("Bunched reports (Windows batched)", format!("{:.1} % ({:.1} %)", r.bunched_frac * 100.0, r.batched_frac * 100.0)),
+                    ("Reports with only 1 count", format!("{:.0} %", r.low_count_frac * 100.0)),
+                    ("Rate stability over time (CV)", format!("{:.1} %", r.rate_cv * 100.0)),
+                ],
+            );
         });
         ui.add_space(10.0);
         widgets::caption(ui, "RATE OVER TIME");

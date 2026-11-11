@@ -168,7 +168,7 @@ impl ZeroInApp {
         // Hero number with a short entrance.
         let text = trim_float(s.recommended_sens, dec);
         let size = 88.0;
-        let (slot, _) = ui.allocate_exact_size(egui::vec2(ui.available_width().min(620.0), size * 1.1), egui::Sense::hover());
+        let (slot, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), size * 1.1), egui::Sense::hover());
         let target = Pos2::new(slot.left(), slot.center().y);
         if !r.kicked {
             r.kicked = true;
@@ -225,7 +225,7 @@ impl ZeroInApp {
                 ))
                 .font(semibold(15.0)),
             );
-            band_chart(ui, &s, lo, hi, ui.available_width().min(620.0));
+            band_chart(ui, &s, lo, hi, ui.available_width());
             widgets::dim(ui, "Anything in this range performed within about 2 points of the best. Pick what feels right in game.");
         }
         if let Some(sum) = s.gear.as_ref().and_then(|g| g.summary()) {
@@ -257,7 +257,7 @@ impl ZeroInApp {
 
         let waiting = r.explain_job.is_some();
         widgets::card(ui, |ui| {
-            ui.set_width(ui.available_width().min(620.0));
+            ui.set_width(ui.available_width());
             ui.horizontal(|ui| {
                 let (ic, label) = match s.explanation_source {
                     ExplanationSource::LocalModel => (widgets::Icon::Cpu, "Written by the local AI model (on this PC)"),
@@ -297,7 +297,8 @@ impl ZeroInApp {
         widgets::dim(ui, format!("At {:.0} DPI, hip-fire.", s.dpi));
         ui.add_space(4.0);
         widgets::card(ui, |ui| {
-            ui.set_width(ui.available_width().min(620.0));
+            ui.set_width(ui.available_width());
+            ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
             egui::Grid::new("conv").num_columns(3).spacing([28.0, 6.0]).striped(false).show(ui, |ui| {
                 for g in GAMES.iter().filter(|g| g.id != s.game.id) {
                     let to = GameProfile::from_game(g);
@@ -313,7 +314,7 @@ impl ZeroInApp {
         ui.add_space(18.0);
         let mut done = false;
         let mut again = false;
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             if widgets::primary_button(ui, &mut self.motion, "Done", true).clicked() {
                 done = true;
             }

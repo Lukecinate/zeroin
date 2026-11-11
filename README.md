@@ -35,6 +35,7 @@ Test, Result and Settings were captured from version 0.2.0, Setup and History fr
 - **Input guards.** Blocks hit by stutter, dropped mouse input, chaotic polling, anticipated clicks or repeated timeouts run again (up to twice). Numbers can be typed with a point or a comma, and DPI written as 1.600 or 1,600 is read as 1600. A warning appears when one mouse count turns the view by more than a pixel.
 - **Local AI, optional.** A small bundled model (Qwen3 1.7B, 4-bit) can write a plain-language explanation of the computed result. It never chooses test settings or changes a number, and text that states other numbers is discarded. If the model is missing, turned off, or the CPU is unsupported, ZeroIn works the same with its built-in summary.
 - **Check mouse.** Settings → Check mouse measures the polling rate your mouse really delivers. Move the mouse fast for five seconds; ZeroIn reads Raw Input in buffered batches on a high-priority thread, timestamps it with the performance counter and reports the effective rate, the rate from the median interval, 1st/99th-percentile intervals, jitter (standard deviation and MAD), skipped polls, bunched delivery, stability over time, a rate graph and an interval histogram. Pick the rate set in your mouse software and the verdict (Good, OK or Problem) says whether it is delivered, flags a high-rate mode that does not hold up, and names the likely source: the mouse, the USB port or wireless link, the PC, or the way the mouse was moved. The device's own name, manufacturer string and USB vendor/product ID are shown; a wireless receiver is shown as the receiver. Anything that cannot be measured says so and why.
+- **Fits any screen.** Pages sit in a centred column that scrolls (wheel, scrollbar, Page Up / Page Down / Home / End) and wraps text instead of cutting it off. The interface follows the Windows display scale and, on Auto, the window size, from a 14" laptop to a 55" TV; Settings → Interface scale also offers 90–150 %. The scale never changes test results.
 - **Built for fast hardware.** Raw Input on a dedicated thread with per-report timestamps; refresh-rate detection with a warning when Windows runs the display below its maximum; drills render uncapped with vsync off.
 - **Hall-effect keyboards.** A raw-input keyboard check shows the fastest release-to-press time per key (rapid trigger), and analog key depth when the Wooting Analog SDK is installed.
 - **Results and conversions.** Recommended sensitivity, cm/360, in/360, eDPI and the equivalent in every other supported game. History is saved locally, and 0.1 history still opens.
@@ -51,7 +52,7 @@ A portable zip without the model is also published. To add the model to the port
 Verify downloads with `SHA256SUMS.txt` from the same release:
 
 ```powershell
-Get-FileHash .\ZeroIn-Setup-0.2.1-x64.exe -Algorithm SHA256
+Get-FileHash .\ZeroIn-Setup-0.2.2-x64.exe -Algorithm SHA256
 ```
 
 ### Requirements
@@ -103,7 +104,7 @@ Releases are built by GitHub Actions on `windows-latest` from a version tag ([re
 
 ## Status
 
-Version 0.2.1. See [CHANGELOG.md](CHANGELOG.md) for what is included.
+Version 0.2.2. See [CHANGELOG.md](CHANGELOG.md) for what is included.
 
 ### Known issues
 

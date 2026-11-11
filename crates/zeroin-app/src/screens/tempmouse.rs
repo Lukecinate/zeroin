@@ -282,30 +282,39 @@ impl ZeroInApp {
             .inner_margin(egui::Margin::same(24));
         let resp = egui::Modal::new(crate::motion::id("temp_mouse_modal")).frame(frame).show(ctx, |ui| {
             ui.set_width(480.0);
-            ui.label(egui::RichText::new("Neutral Windows settings for this test?").font(bold(20.0)).color(TEXT));
-            ui.add_space(6.0);
-            widgets::dim(ui, PROMPT);
-            ui.add_space(12.0);
-            if let Some(c) = cur {
-                egui::Grid::new(crate::motion::id("temp_mouse_grid")).num_columns(4).spacing([14.0, 8.0]).show(ui, |ui| {
-                    for ch in changes(c, MouseParams::NEUTRAL) {
-                        ui.label(egui::RichText::new(ch.label).font(semibold(14.0)).color(TEXT));
-                        ui.label(egui::RichText::new(ch.from).color(TEXT_DIM));
-                        ui.label(egui::RichText::new("→").color(TEXT_DIM));
-                        ui.label(egui::RichText::new(ch.to).font(semibold(14.0)).color(CORAL));
-                        ui.end_row();
-                    }
-                });
+            // Short windows: the dialog scrolls instead of running off screen.
+            // The buttons stay below the scrolling part, always in view.
+            let max_h = (ui.ctx().content_rect().height() - 96.0 - 48.0 - 90.0).max(120.0);
+            ui.spacing_mut().scroll = egui::style::ScrollStyle::solid();
+            egui::ScrollArea::vertical().max_height(max_h).min_scrolled_height(max_h).show(ui, |ui| {
+                ui.label(egui::RichText::new("Neutral Windows settings for this test?").font(bold(20.0)).color(TEXT));
+                ui.add_space(6.0);
+                widgets::dim(ui, PROMPT);
+                ui.add_space(12.0);
+                if let Some(c) = cur {
+                    ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
+                    egui::Grid::new(crate::motion::id("temp_mouse_grid")).num_columns(4).spacing([14.0, 8.0]).show(ui, |ui| {
+                        for ch in changes(c, MouseParams::NEUTRAL) {
+                            ui.label(egui::RichText::new(ch.label).font(semibold(14.0)).color(TEXT));
+                            ui.label(egui::RichText::new(ch.from).color(TEXT_DIM));
+                            ui.label(egui::RichText::new("→").color(TEXT_DIM));
+                            ui.label(egui::RichText::new(ch.to).font(semibold(14.0)).color(CORAL));
+                            ui.end_row();
+                        }
+                    });
+                    ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Wrap);
+                    ui.add_space(10.0);
+                }
+                widgets::dim(
+                    ui,
+                    "Only while drills run; Esc, switching away or closing ZeroIn puts your values back. The change is not saved to your Windows profile, so signing out also undoes it. The result does not depend on this: ZeroIn reads raw mouse counts either way.",
+                );
                 ui.add_space(10.0);
-            }
-            widgets::dim(
-                ui,
-                "Only while drills run; Esc, switching away or closing ZeroIn puts your values back. The change is not saved to your Windows profile, so signing out also undoes it. The result does not depend on this: ZeroIn reads raw mouse counts either way.",
-            );
-            ui.add_space(10.0);
-            ui.checkbox(&mut self.temp_mouse.remember, "Remember my choice (change it in Settings)");
-            ui.add_space(14.0);
-            ui.horizontal(|ui| {
+                ui.checkbox(&mut self.temp_mouse.remember, "Remember my choice (change it in Settings)");
+                ui.add_space(14.0);
+            });
+            ui.add_space(6.0);
+            ui.horizontal_wrapped(|ui| {
                 if widgets::primary_button(ui, &mut self.motion, "Yes, for this test", true).clicked() {
                     answer = Some(true);
                 }

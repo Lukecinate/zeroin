@@ -319,6 +319,18 @@ pub const INPUT_GAP_US: u64 = 250_000;
 /// to count as dropped input. Stricter than the 10 % in the spec, to avoid
 /// re-running blocks after a natural pause.
 const GAP_SPEED_FRAC: f64 = 0.25;
+/// Hand speed is measured over this window of arrival time, so reports that
+/// Windows delivers in a burst do not look like a fast hand.
+const SPEED_WINDOW_US: u64 = 8_000;
+/// A gap only counts when the trial's movement has reached this speed
+/// (degrees per millisecond, 60 °/s); smaller motions are settling, not a flick.
+const GAP_MIN_PEAK: f64 = 0.06;
+/// ... and only between these fractions of the way to the target, before
+/// the first stop: the middle of the movement.
+const GAP_MID_FROM: f64 = 0.1;
+const GAP_MID_TO: f64 = 0.9;
+/// After a gap, the hand must be moving fast again within this time.
+const GAP_RESUME_US: u64 = 60_000;
 const STOP_GAP_US: u64 = 35_000;
 const TRACK_GRACE_US: u64 = 600_000;
 /// Tracking error is integrated in steps of at most this length.
@@ -340,9 +352,15 @@ struct ActiveTrial {
     last_sign: i8,
     corrections: u32,
     warmup: bool,
+    /// Recent (arrival time, degrees moved) for windowed hand speed.
+    recent: std::collections::VecDeque<(u64, f64)>,
     peak_speed: f64,
-    last_speed: f64,
-    gap_pending: bool,
+    /// Time of the last report with any motion.
+    last_any_us: Option<u64>,
+    /// At the last report the hand was fast and mid-movement.
+    fast_mid_movement: bool,
+    /// A gap ended at this time; (start, degrees since) while checking the resume speed.
+    resume: Option<(u64, f64)>,
 }
 
 impl ActiveTrial {
@@ -516,9 +534,11 @@ impl DrillSession {
             last_sign: 0,
             corrections: 0,
             warmup,
+            recent: std::collections::VecDeque::new(),
             peak_speed: 0.0,
-            last_speed: 0.0,
-            gap_pending: false,
+            last_any_us: None,
+            fast_mid_movement: false,
+            resume: None,
         });
     }
 
@@ -598,24 +618,11 @@ impl DrillSession {
             } else {
                 0
             };
+            let moved_deg = dyaw.hypot(dpitch);
+            if moved_deg > 0.0 {
+                Self::track_gap(tr, now_us, moved_deg, &mut self.input_gaps);
+            }
             if sign != 0 {
-                // Hand speed in degrees per ms, used to spot dropped input.
-                let gap = now_us.saturating_sub(tr.last_motion_us);
-                let speed = (dyaw.hypot(dpitch)) / (gap.max(125) as f64 / 1000.0);
-                // Smoothed so single fast reports at the end of a stop do not count.
-                if tr.gap_pending {
-                    if gap < 50_000 && speed > GAP_SPEED_FRAC * tr.peak_speed {
-                        self.input_gaps += 1;
-                    }
-                    tr.gap_pending = false;
-                }
-                if tr.moved && gap > INPUT_GAP_US && tr.last_speed > GAP_SPEED_FRAC * tr.peak_speed {
-                    tr.gap_pending = true;
-                    tr.last_speed = 0.0;
-                } else {
-                    tr.last_speed = 0.7 * tr.last_speed + 0.3 * speed;
-                    tr.peak_speed = tr.peak_speed.max(tr.last_speed);
-                }
                 if tr.first_stop.is_some() && tr.last_sign != 0 && sign != tr.last_sign {
                     tr.corrections += 1;
                 }
@@ -627,6 +634,47 @@ impl DrillSession {
                 tr.first_on_us = Some(now_us);
             }
         }
+    }
+
+    /// Dropped-input check, fed with every report that moves the view.
+    ///
+    /// A gap counts only when all of these hold: no report for over
+    /// [`INPUT_GAP_US`]; just before it the hand was moving at least
+    /// [`GAP_SPEED_FRAC`] of the trial's peak speed, the peak was a real
+    /// movement ([`GAP_MIN_PEAK`]) and the view was in the middle of the way
+    /// to the target before its first stop; and within [`GAP_RESUME_US`]
+    /// after it the hand is that fast again. Speed is measured over
+    /// [`SPEED_WINDOW_US`] of arrival time, so bursts of reports do not
+    /// inflate it, and a pause to react to a new target is not counted.
+    fn track_gap(tr: &mut ActiveTrial, now_us: u64, moved_deg: f64, input_gaps: &mut u32) {
+        let gap = tr.last_any_us.map(|t| now_us.saturating_sub(t));
+        if let Some((start, deg)) = tr.resume.as_mut() {
+            *deg += moved_deg;
+            let span = now_us.saturating_sub(*start);
+            if span > GAP_RESUME_US {
+                tr.resume = None;
+            } else if span >= SPEED_WINDOW_US {
+                if *deg / (span as f64 / 1000.0) > GAP_SPEED_FRAC * tr.peak_speed {
+                    *input_gaps += 1;
+                }
+                tr.resume = None;
+            }
+        }
+        if gap.is_some_and(|g| g > INPUT_GAP_US) {
+            if tr.fast_mid_movement {
+                tr.resume = Some((now_us, 0.0));
+            }
+            tr.recent.clear();
+        }
+        tr.recent.push_back((now_us, moved_deg));
+        while tr.recent.front().is_some_and(|&(t, _)| now_us.saturating_sub(t) >= SPEED_WINDOW_US) {
+            tr.recent.pop_front();
+        }
+        let speed = tr.recent.iter().map(|&(_, d)| d).sum::<f64>() / (SPEED_WINDOW_US as f64 / 1000.0);
+        tr.peak_speed = tr.peak_speed.max(speed);
+        let mid = tr.first_stop.is_none() && tr.progress >= GAP_MID_FROM * tr.dist0 && tr.progress <= GAP_MID_TO * tr.dist0;
+        tr.fast_mid_movement = mid && tr.peak_speed >= GAP_MIN_PEAK && speed > GAP_SPEED_FRAC * tr.peak_speed;
+        tr.last_any_us = Some(now_us);
     }
 
     /// Left click. Returns `Some(hit)` when the click resolved a trial.
@@ -1232,23 +1280,56 @@ mod tests {
         assert_eq!(tracking_block_with_intervals(chaotic, None).validity(), Ok(()));
     }
 
-    #[test]
-    fn dropped_input_mid_movement_is_flagged() {
+    /// Flick toward the target at `counts` per report and `interval_us`
+    /// until `frac` of the distance, then `pause_us` without reports, then
+    /// carry on at `resume_counts` per report. Returns the gaps counted.
+    fn flick_with_pause(interval_us: u64, counts: i32, frac: f64, pause_us: u64, resume_counts: i32, burst: usize) -> u32 {
         let plan = DrillPlan { warmup: 0, flicks: 1, micros: 0, tracking_s: 1.0, ..DrillPlan::BALANCED };
         let mut s = DrillSession::new(DrillKind::Flick, 0.02, &plan, 1, 1);
         s.click(0);
+        let (dir, dist) = {
+            let tr = s.trial.as_ref().unwrap();
+            (tr.dir, tr.dist0)
+        };
+        let step = |c: i32| ((c as f64 * dir.0).round() as i32, -((c as f64 * dir.1).round() as i32));
         let mut t = 0;
-        for _ in 0..20 {
-            t += 1_000;
-            s.motion(10, 0, t);
+        let mut k = 0usize;
+        while s.trial.as_ref().unwrap().progress < frac * dist {
+            k += 1;
+            // With `burst` > 1, reports arrive in groups at the same time.
+            if burst <= 1 || k.is_multiple_of(burst) {
+                t += interval_us * burst.max(1) as u64;
+            }
+            let (dx, dy) = step(counts);
+            s.motion(dx, dy, t);
         }
-        t += 300_000; // reports stop while the hand is moving fast
-        for _ in 0..5 {
-            s.motion(10, 0, t);
-            t += 1_000;
+        t += pause_us;
+        // 20 ms of reports after the pause.
+        for _ in 0..(20_000 / interval_us) {
+            let (dx, dy) = step(resume_counts);
+            s.motion(dx, dy, t);
+            t += interval_us;
         }
-        assert_eq!(s.input_gaps(), 1);
-        // A natural stop (slow down first) is not flagged.
+        s.input_gaps()
+    }
+
+    #[test]
+    fn dropped_input_mid_movement_is_flagged() {
+        // 1000 Hz and 8000 Hz: reports stop for 300 ms mid-flick, then resume fast.
+        assert_eq!(flick_with_pause(1_000, 10, 0.4, 300_000, 10, 1), 1);
+        assert_eq!(flick_with_pause(125, 2, 0.4, 300_000, 2, 1), 1);
+        // Same with bursty arrival (Windows delivering 4 reports at once).
+        assert_eq!(flick_with_pause(1_000, 10, 0.4, 300_000, 10, 4), 1);
+        // A gap under 250 ms is not counted.
+        assert_eq!(flick_with_pause(1_000, 10, 0.4, 200_000, 10, 1), 0);
+        // Resuming slowly after the pause is a new, deliberate movement.
+        assert_eq!(flick_with_pause(1_000, 10, 0.4, 300_000, 1, 1), 0);
+    }
+
+    #[test]
+    fn natural_stops_are_not_gaps() {
+        let plan = DrillPlan { warmup: 0, flicks: 1, micros: 0, tracking_s: 1.0, ..DrillPlan::BALANCED };
+        // Slow down first, then pause and move again.
         let mut s = DrillSession::new(DrillKind::Flick, 0.02, &plan, 1, 1);
         s.click(0);
         let mut t = 0;
@@ -1259,6 +1340,54 @@ mod tests {
         t += 400_000;
         s.motion(10, 0, t);
         s.motion(10, 0, t + 1_000);
+        assert_eq!(s.input_gaps(), 0);
+        // The last slow reports before a pause arrive in one burst (Windows
+        // delivered them late); that must not look like a fast hand.
+        let mut s = DrillSession::new(DrillKind::Flick, 0.02, &plan, 1, 1);
+        s.click(0);
+        let dir = s.trial.as_ref().unwrap().dir;
+        let step = |c: i32| ((c as f64 * dir.0).round() as i32, -((c as f64 * dir.1).round() as i32));
+        let mut t = 0;
+        for _ in 0..60 {
+            t += 1_000;
+            let (dx, dy) = step(10);
+            s.motion(dx, dy, t);
+        }
+        t += 30_000;
+        for _ in 0..12 {
+            let (dx, dy) = step(1);
+            s.motion(dx, dy, t);
+        }
+        t += 300_000;
+        for _ in 0..20 {
+            t += 1_000;
+            let (dx, dy) = step(10);
+            s.motion(dx, dy, t);
+        }
+        assert_eq!(s.input_gaps(), 0);
+        // Stopping near the target (past 90 %) and then correcting is not mid-movement.
+        assert_eq!(flick_with_pause(1_000, 10, 0.95, 300_000, 10, 1), 0);
+        // Before the movement starts (a hesitation at the start) is not mid-movement.
+        assert_eq!(flick_with_pause(1_000, 10, 0.02, 300_000, 10, 1), 0);
+    }
+
+    #[test]
+    fn reaction_pause_after_small_settle_is_not_a_gap() {
+        // The hand settles a little after the previous click, the player
+        // reacts to the new target (300 ms without input), then flicks.
+        let plan = DrillPlan { warmup: 0, flicks: 1, micros: 0, tracking_s: 1.0, ..DrillPlan::BALANCED };
+        let mut s = DrillSession::new(DrillKind::Flick, 0.02, &plan, 1, 1);
+        s.click(0);
+        let mut t = 0;
+        for _ in 0..4 {
+            t += 1_000;
+            s.motion(2, 1, t);
+        }
+        t += 300_000;
+        for _ in 0..40 {
+            s.motion(12, 0, t);
+            t += 1_000;
+        }
         assert_eq!(s.input_gaps(), 0);
     }
 }

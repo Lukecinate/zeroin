@@ -1,3 +1,5 @@
+#[cfg(all(debug_assertions, not(windows)))]
+pub mod dev;
 pub mod history;
 pub mod mousecheck;
 pub mod result;
