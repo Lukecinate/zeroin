@@ -337,12 +337,7 @@ const PAUSE_NS: u64 = 50_000_000;
 const MIN_FAST_WINDOWS: usize = 10;
 
 fn median(v: &mut [f64]) -> Option<f64> {
-    if v.is_empty() {
-        return None;
-    }
-    v.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-    let n = v.len();
-    Some(if n % 2 == 1 { v[n / 2] } else { 0.5 * (v[n / 2 - 1] + v[n / 2]) })
+    crate::math::median_in_place(v)
 }
 
 fn percentile(sorted: &[f64], q: f64) -> f64 {
@@ -461,8 +456,9 @@ pub fn check(reports: &[Report], claimed_hz: Option<u32>) -> Result<CheckReport,
         }
         // Leave out intervals touching a bunched or batched report: their
         // arrival time is the read time, not the report time.
-        let prev_bunched =
-            k >= 2 && window_of[k - 2] == window_of[k] && ((reports[k - 1].t_ns - reports[k - 2].t_ns) as f64 / 1000.0) < 0.25 * t_exp_us;
+        let prev_bunched = k >= 2
+            && window_of[k - 2] == window_of[k]
+            && ((reports[k - 1].t_ns.saturating_sub(reports[k - 2].t_ns)) as f64 / 1000.0) < 0.25 * t_exp_us;
         if r.batch <= 1 && reports[k - 1].batch <= 1 && !prev_bunched {
             clean.push(d_us);
         }

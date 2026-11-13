@@ -122,7 +122,16 @@ impl ZeroInApp {
 
     pub fn poll_llm(&mut self) {
         for reply in self.llm.poll() {
-            let Ok(text) = reply.text else { continue };
+            let Ok(text) = reply.text else {
+                // Failed, cancelled or timed out: keep the built-in summary
+                // and stop showing "writing…".
+                if let Some(r) = self.result.as_mut() {
+                    if r.explain_job == Some(reply.id) {
+                        r.explain_job = None;
+                    }
+                }
+                continue;
+            };
             match reply.kind {
                 JobKind::Explain => {
                     let mut updated = None;

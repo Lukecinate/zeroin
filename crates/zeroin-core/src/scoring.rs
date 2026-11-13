@@ -100,16 +100,7 @@ pub fn tracking_v2(tr: &crate::drills::TrackingResult) -> f64 {
 }
 
 fn median(mut v: Vec<f64>) -> f64 {
-    if v.is_empty() {
-        return 0.0;
-    }
-    v.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-    let n = v.len();
-    if n % 2 == 1 {
-        v[n / 2]
-    } else {
-        0.5 * (v[n / 2 - 1] + v[n / 2])
-    }
+    crate::math::median_in_place(&mut v).unwrap_or(0.0)
 }
 
 /// Fitts' law index of difficulty (Shannon form), bits.

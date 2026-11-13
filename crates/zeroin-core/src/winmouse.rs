@@ -171,7 +171,34 @@ pub struct TempJournal {
     pub applied: MouseParams,
     /// When the journal was written (Unix seconds).
     pub saved_unix: u64,
+    /// The Windows sign-in session that made the change (absent in 0.2.1–0.2.2 journals).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session: Option<SignInSession>,
 }
+
+/// Identifies one Windows sign-in: the logon session id (unique until the
+/// next restart) and the approximate boot time, so ids reused after a
+/// restart do not match.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SignInSession {
+    /// Unix time of the last boot (now minus uptime), seconds.
+    pub boot_unix: u64,
+    /// Logon session identifier.
+    pub logon: u64,
+}
+
+impl SignInSession {
+    /// Same sign-in. The boot time is derived from the wall clock, so it may
+    /// drift by clock corrections; an hour of tolerance absorbs that.
+    pub fn same_as(&self, other: &SignInSession) -> bool {
+        self.logon == other.logon && self.boot_unix.abs_diff(other.boot_unix) <= 3600
+    }
+}
+
+/// A journal older than this is never replayed: values set for one session
+/// do not outlive a day of uptime in practice, and an old journal is more
+/// likely to undo a choice the user made since.
+pub const JOURNAL_MAX_AGE_SECS: u64 = 24 * 3600;
 
 /// Reads and writes pointer settings for the current sign-in session only.
 pub trait PointerBackend {
@@ -204,12 +231,12 @@ pub enum BeginTemp {
 
 /// Apply neutral settings for a test: read, journal, write, verify. Any
 /// failure puts the previous values back and removes the journal.
-pub fn begin_temp(be: &mut dyn PointerBackend, js: &mut dyn JournalStore, now_unix: u64) -> BeginTemp {
+pub fn begin_temp(be: &mut dyn PointerBackend, js: &mut dyn JournalStore, now_unix: u64, session: Option<SignInSession>) -> BeginTemp {
     let Some(cur) = be.read() else { return BeginTemp::Failed("Windows pointer settings could not be read.".into()) };
     if cur.is_neutral() {
         return BeginTemp::AlreadyNeutral;
     }
-    let j = TempJournal { previous: cur, applied: MouseParams::NEUTRAL, saved_unix: now_unix };
+    let j = TempJournal { previous: cur, applied: MouseParams::NEUTRAL, saved_unix: now_unix, session };
     if let Err(e) = js.save(&j) {
         return BeginTemp::Failed(format!("Nothing was changed: the restore copy could not be saved ({e})."));
     }
@@ -256,9 +283,18 @@ pub enum Recovery {
     Failed(String),
 }
 
-/// Start-up check after an interrupted test.
-pub fn recover_temp(be: &mut dyn PointerBackend, js: &mut dyn JournalStore) -> Recovery {
+/// Start-up check after an interrupted test. A journal from another
+/// sign-in session or older than [`JOURNAL_MAX_AGE_SECS`] is dropped
+/// without writing anything: Windows already reverted session-only values at
+/// sign-out, so neutral values seen now are the user's own choice.
+pub fn recover_temp(be: &mut dyn PointerBackend, js: &mut dyn JournalStore, now_unix: u64, current: Option<SignInSession>) -> Recovery {
     let Some(j) = js.load() else { return Recovery::Nothing };
+    let other_session = matches!((j.session, current), (Some(a), Some(b)) if !a.same_as(&b));
+    let too_old = now_unix.saturating_sub(j.saved_unix) > JOURNAL_MAX_AGE_SECS || j.saved_unix > now_unix.saturating_add(3600);
+    if other_session || too_old {
+        let _ = js.remove();
+        return Recovery::NotNeeded;
+    }
     let Some(cur) = be.read() else { return Recovery::Failed("Windows pointer settings could not be read.".into()) };
     if verify(j.applied, Some(cur)) != Verify::Ok {
         let _ = js.remove();
@@ -381,7 +417,7 @@ mod tests {
     fn temp_apply_and_exact_restore() {
         let mut pc = MockPc { cur: Some(USER), ..Default::default() };
         let mut js = MockJournal::default();
-        let BeginTemp::Applied(j) = begin_temp(&mut pc, &mut js, 7) else { panic!("not applied") };
+        let BeginTemp::Applied(j) = begin_temp(&mut pc, &mut js, 7, None) else { panic!("not applied") };
         assert_eq!(pc.cur, Some(MouseParams::NEUTRAL));
         assert_eq!(js.j, Some(j), "journal written");
         assert_eq!(j.previous, USER);
@@ -394,7 +430,7 @@ mod tests {
     fn temp_never_writes_without_a_journal() {
         let mut pc = MockPc { cur: Some(USER), ..Default::default() };
         let mut js = MockJournal { fail_save: true, ..Default::default() };
-        assert!(matches!(begin_temp(&mut pc, &mut js, 0), BeginTemp::Failed(_)));
+        assert!(matches!(begin_temp(&mut pc, &mut js, 0, None), BeginTemp::Failed(_)));
         assert!(pc.writes.is_empty());
         assert_eq!(pc.cur, Some(USER));
     }
@@ -403,9 +439,9 @@ mod tests {
     fn temp_skips_neutral_and_unreadable() {
         let mut js = MockJournal::default();
         let mut pc = MockPc { cur: Some(MouseParams::NEUTRAL), ..Default::default() };
-        assert_eq!(begin_temp(&mut pc, &mut js, 0), BeginTemp::AlreadyNeutral);
+        assert_eq!(begin_temp(&mut pc, &mut js, 0, None), BeginTemp::AlreadyNeutral);
         let mut pc = MockPc::default();
-        assert!(matches!(begin_temp(&mut pc, &mut js, 0), BeginTemp::Failed(_)));
+        assert!(matches!(begin_temp(&mut pc, &mut js, 0, None), BeginTemp::Failed(_)));
         assert!(js.j.is_none() && pc.writes.is_empty());
     }
 
@@ -413,11 +449,11 @@ mod tests {
     fn temp_overridden_by_policy_is_undone() {
         let mut pc = MockPc { cur: Some(USER), forced: Some(USER), ..Default::default() };
         let mut js = MockJournal::default();
-        assert!(matches!(begin_temp(&mut pc, &mut js, 0), BeginTemp::Failed(_)));
+        assert!(matches!(begin_temp(&mut pc, &mut js, 0, None), BeginTemp::Failed(_)));
         assert_eq!(pc.cur, Some(USER));
         assert!(js.j.is_none());
         let mut pc = MockPc { cur: Some(USER), fail_writes: true, ..Default::default() };
-        assert!(matches!(begin_temp(&mut pc, &mut js, 0), BeginTemp::Failed(_)));
+        assert!(matches!(begin_temp(&mut pc, &mut js, 0, None), BeginTemp::Failed(_)));
         assert_eq!(js.j.map(|j| j.previous), Some(USER), "journal kept when the undo itself fails");
     }
 
@@ -425,7 +461,7 @@ mod tests {
     fn failed_restore_keeps_journal() {
         let mut pc = MockPc { cur: Some(USER), ..Default::default() };
         let mut js = MockJournal::default();
-        let BeginTemp::Applied(j) = begin_temp(&mut pc, &mut js, 0) else { panic!() };
+        let BeginTemp::Applied(j) = begin_temp(&mut pc, &mut js, 0, None) else { panic!() };
         pc.fail_writes = true;
         assert!(end_temp(&mut pc, &mut js, &j).is_err());
         assert!(js.j.is_some());
@@ -436,33 +472,75 @@ mod tests {
         // Crash mid-test: neutral values still active, journal on disk.
         let mut pc = MockPc { cur: Some(USER), ..Default::default() };
         let mut js = MockJournal::default();
-        let BeginTemp::Applied(_) = begin_temp(&mut pc, &mut js, 0) else { panic!() };
-        assert_eq!(recover_temp(&mut pc, &mut js), Recovery::Restored(USER));
+        let BeginTemp::Applied(_) = begin_temp(&mut pc, &mut js, 0, None) else { panic!() };
+        assert_eq!(recover_temp(&mut pc, &mut js, 0, None), Recovery::Restored(USER));
         assert_eq!(pc.cur, Some(USER));
         assert!(js.j.is_none());
-        assert_eq!(recover_temp(&mut pc, &mut js), Recovery::Nothing);
+        assert_eq!(recover_temp(&mut pc, &mut js, 0, None), Recovery::Nothing);
 
         // Restarted since: Windows already shows the user's values again.
-        let _ = begin_temp(&mut pc, &mut js, 0);
+        let _ = begin_temp(&mut pc, &mut js, 0, None);
         pc.cur = Some(USER);
         let n = pc.writes.len();
-        assert_eq!(recover_temp(&mut pc, &mut js), Recovery::NotNeeded);
+        assert_eq!(recover_temp(&mut pc, &mut js, 0, None), Recovery::NotNeeded);
         assert_eq!(pc.writes.len(), n, "nothing written");
         assert!(js.j.is_none());
 
         // Unreadable now: keep the journal for later.
-        let _ = begin_temp(&mut pc, &mut js, 0);
+        let _ = begin_temp(&mut pc, &mut js, 0, None);
         pc.cur = None;
-        assert!(matches!(recover_temp(&mut pc, &mut js), Recovery::Failed(_)));
+        assert!(matches!(recover_temp(&mut pc, &mut js, 0, None), Recovery::Failed(_)));
         assert!(js.j.is_some());
     }
 
     #[test]
     fn journal_and_label_json() {
-        let j = TempJournal { previous: USER, applied: MouseParams::NEUTRAL, saved_unix: 9 };
+        let j = TempJournal { previous: USER, applied: MouseParams::NEUTRAL, saved_unix: 9, session: None };
         let s = serde_json::to_string(&j).unwrap();
         assert_eq!(serde_json::from_str::<TempJournal>(&s).unwrap(), j);
         let p = serde_json::to_string(&PointerDuringTest::TemporarilyNeutral).unwrap();
         assert_eq!(serde_json::from_str::<PointerDuringTest>(&p).unwrap(), PointerDuringTest::TemporarilyNeutral);
+    }
+
+    #[test]
+    fn journal_from_another_sign_in_or_too_old_is_not_replayed() {
+        let s1 = SignInSession { boot_unix: 1_000_000, logon: 0x1234 };
+        let s2 = SignInSession { boot_unix: 1_000_000, logon: 0x9999 };
+        // Crash in session 1, sign out (values revert), then the user sets
+        // neutral values on purpose in session 2.
+        let mut pc = MockPc { cur: Some(USER), ..Default::default() };
+        let mut js = MockJournal::default();
+        let BeginTemp::Applied(_) = begin_temp(&mut pc, &mut js, 5_000, Some(s1)) else { panic!() };
+        pc.cur = Some(MouseParams::NEUTRAL);
+        let n = pc.writes.len();
+        assert_eq!(recover_temp(&mut pc, &mut js, 5_100, Some(s2)), Recovery::NotNeeded);
+        assert_eq!(pc.writes.len(), n, "nothing written");
+        assert_eq!(pc.cur, Some(MouseParams::NEUTRAL));
+        assert!(js.j.is_none());
+
+        // Same sign-in (boot time drifted by a clock correction): restored.
+        let mut pc = MockPc { cur: Some(USER), ..Default::default() };
+        let BeginTemp::Applied(_) = begin_temp(&mut pc, &mut js, 5_000, Some(s1)) else { panic!() };
+        let drifted = SignInSession { boot_unix: s1.boot_unix + 90, ..s1 };
+        assert_eq!(recover_temp(&mut pc, &mut js, 5_100, Some(drifted)), Recovery::Restored(USER));
+
+        // Older than a day: dropped.
+        let mut pc = MockPc { cur: Some(USER), ..Default::default() };
+        let BeginTemp::Applied(_) = begin_temp(&mut pc, &mut js, 5_000, Some(s1)) else { panic!() };
+        assert_eq!(recover_temp(&mut pc, &mut js, 5_000 + JOURNAL_MAX_AGE_SECS + 1, Some(s1)), Recovery::NotNeeded);
+        assert_eq!(pc.cur, Some(MouseParams::NEUTRAL));
+
+        // A 0.2.2 journal (no session) still recovers within a day.
+        let mut pc = MockPc { cur: Some(USER), ..Default::default() };
+        let BeginTemp::Applied(_) = begin_temp(&mut pc, &mut js, 5_000, None) else { panic!() };
+        assert_eq!(recover_temp(&mut pc, &mut js, 5_010, Some(s2)), Recovery::Restored(USER));
+    }
+
+    #[test]
+    fn old_journal_json_without_session_still_loads() {
+        let old = r#"{"previous":{"threshold1":6,"threshold2":10,"acceleration":1,"speed":12},"applied":{"threshold1":0,"threshold2":0,"acceleration":0,"speed":10},"saved_unix":9}"#;
+        let j: TempJournal = serde_json::from_str(old).unwrap();
+        assert_eq!(j.session, None);
+        assert_eq!(j.previous.speed, 12);
     }
 }

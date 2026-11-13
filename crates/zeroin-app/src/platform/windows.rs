@@ -1,7 +1,8 @@
 //! Win32: Raw Input on a dedicated thread, mouse settings and display modes.
 
+use super::queue::{event_queue, EventReceiver, DEFAULT_CAPACITY};
 use super::{now_us, DisplayInfo, InputEvent, InputKind, MouseSettings};
-use std::sync::mpsc::{channel, Receiver};
+use std::sync::mpsc::channel;
 use windows::core::{w, PCWSTR};
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::Graphics::Gdi::{EnumDisplaySettingsW, DEVMODEW, ENUM_CURRENT_SETTINGS, ENUM_DISPLAY_SETTINGS_MODE};
@@ -25,7 +26,7 @@ const RI_KEY_BREAK: u16 = 0x0001;
 pub(crate) static MAIN_RAW_HWND: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(0);
 
 pub struct RawInput {
-    rx: Option<Receiver<InputEvent>>,
+    rx: Option<EventReceiver>,
 }
 
 unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
@@ -37,7 +38,8 @@ impl RawInput {
     /// exists so this registration (one target per device class per process)
     /// is the one that stays active.
     pub fn start() -> Self {
-        let (tx, rx) = channel::<InputEvent>();
+        // Bounded: nothing can pile up while the window gets no frames.
+        let (tx, rx) = event_queue(DEFAULT_CAPACITY);
         let (ready_tx, ready_rx) = channel::<bool>();
         let spawned = std::thread::Builder::new().name("zeroin-raw-input".into()).spawn(move || {
             // SAFETY: plain Win32 calls on this thread's own message-only window.
@@ -83,38 +85,47 @@ impl RawInput {
                 MAIN_RAW_HWND.store(hwnd.0 as isize, std::sync::atomic::Ordering::SeqCst);
                 let _ = ready_tx.send(true);
                 let mut msg = MSG::default();
-                let mut buf: Vec<u8> = vec![0; 256];
-                while GetMessageW(&mut msg, None, 0, 0).as_bool() {
+                // u64 storage keeps the buffer 8-byte aligned; the struct is
+                // still copied out with read_unaligned, as in poll_windows.rs.
+                let raw_size = std::mem::size_of::<RAWINPUT>();
+                let mut buf: Vec<u64> = vec![0; raw_size.div_ceil(8).max(32)];
+                // GetMessageW returns -1 on error: only > 0 means a message.
+                while GetMessageW(&mut msg, None, 0, 0).0 > 0 {
                     if msg.message == WM_INPUT {
                         let t_us = now_us();
                         let handle = HRAWINPUT(msg.lParam.0 as _);
                         let mut size = 0u32;
                         let hdr = std::mem::size_of::<RAWINPUTHEADER>() as u32;
-                        GetRawInputData(handle, RID_INPUT, None, &mut size, hdr);
-                        if size as usize > buf.len() {
-                            buf.resize(size as usize, 0);
+                        if GetRawInputData(handle, RID_INPUT, None, &mut size, hdr) != 0 || size == 0 || size > 64 * 1024 {
+                            DispatchMessageW(&msg);
+                            continue;
+                        }
+                        let need = (size as usize).max(raw_size).div_ceil(8);
+                        if need > buf.len() {
+                            buf.resize(need, 0);
                         }
                         let got = GetRawInputData(handle, RID_INPUT, Some(buf.as_mut_ptr() as *mut _), &mut size, hdr);
                         if got != u32::MAX && got as usize >= std::mem::size_of::<RAWINPUTHEADER>() {
-                            let raw = &*(buf.as_ptr() as *const RAWINPUT);
+                            // SAFETY: the buffer holds at least size_of::<RAWINPUT>() initialised bytes.
+                            let raw: RAWINPUT = std::ptr::read_unaligned(buf.as_ptr() as *const RAWINPUT);
                             let device = raw.header.hDevice.0 as usize as u64;
                             if raw.header.dwType == RIM_TYPEMOUSE.0 {
                                 let m = raw.data.mouse;
                                 let flags = m.usFlags.0;
                                 let buttons = m.Anonymous.Anonymous.usButtonFlags;
                                 if flags & MOUSE_MOVE_ABSOLUTE == 0 && (m.lLastX != 0 || m.lLastY != 0) {
-                                    let _ = tx.send(InputEvent { t_us, device, kind: InputKind::Motion { dx: m.lLastX, dy: m.lLastY } });
+                                    tx.push(InputEvent { t_us, device, kind: InputKind::Motion { dx: m.lLastX, dy: m.lLastY } });
                                 }
                                 if buttons & RI_MOUSE_LEFT_BUTTON_DOWN != 0 {
-                                    let _ = tx.send(InputEvent { t_us, device, kind: InputKind::LeftButton { down: true } });
+                                    tx.push(InputEvent { t_us, device, kind: InputKind::LeftButton { down: true } });
                                 }
                                 if buttons & RI_MOUSE_LEFT_BUTTON_UP != 0 {
-                                    let _ = tx.send(InputEvent { t_us, device, kind: InputKind::LeftButton { down: false } });
+                                    tx.push(InputEvent { t_us, device, kind: InputKind::LeftButton { down: false } });
                                 }
                             } else if raw.header.dwType == RIM_TYPEKEYBOARD.0 {
                                 let k = raw.data.keyboard;
                                 let down = k.Flags & RI_KEY_BREAK == 0;
-                                let _ = tx.send(InputEvent { t_us, device, kind: InputKind::Key { vkey: k.VKey, down } });
+                                tx.push(InputEvent { t_us, device, kind: InputKind::Key { vkey: k.VKey, down } });
                             }
                         }
                     }
@@ -134,21 +145,23 @@ impl RawInput {
     /// Move all pending events into `out`.
     pub fn drain(&self, out: &mut Vec<InputEvent>) {
         if let Some(rx) = &self.rx {
-            out.extend(rx.try_iter());
+            rx.drain(out);
+        }
+    }
+
+    /// Whether the UI wants events (window focused). While false the input
+    /// thread drops reports instead of queueing them.
+    pub fn set_accept(&self, on: bool) {
+        if let Some(rx) = &self.rx {
+            rx.set_accept(on);
         }
     }
 }
 
 /// Read pointer speed and "Enhance pointer precision".
 pub fn mouse_settings() -> Option<MouseSettings> {
-    let mut speed: i32 = 0;
-    let mut accel: [i32; 3] = [0; 3];
-    // SAFETY: both buffers are the sizes these SPI actions document.
-    unsafe {
-        SystemParametersInfoW(SPI_GETMOUSESPEED, 0, Some(&mut speed as *mut i32 as *mut _), SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0)).ok()?;
-        SystemParametersInfoW(SPI_GETMOUSE, 0, Some(accel.as_mut_ptr() as *mut _), SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0)).ok()?;
-    }
-    Some(MouseSettings { pointer_speed: speed.clamp(1, 20) as u32, enhance_pointer_precision: accel[2] != 0 })
+    let p = mouse_params()?;
+    Some(MouseSettings { pointer_speed: p.speed, enhance_pointer_precision: p.acceleration != 0 })
 }
 
 /// Current and maximum refresh rate of the primary display.
@@ -217,17 +230,63 @@ pub fn set_mouse_params_session(p: zeroin_core::winmouse::MouseParams) -> Result
 }
 
 fn write_mouse_params(p: zeroin_core::winmouse::MouseParams, persist: bool) -> Result<(), String> {
-    use windows::Win32::UI::WindowsAndMessaging::{SPIF_SENDCHANGE, SPIF_UPDATEINIFILE, SPI_SETMOUSE, SPI_SETMOUSESPEED};
+    use windows::Win32::UI::WindowsAndMessaging::{SPIF_UPDATEINIFILE, SPI_SETMOUSE, SPI_SETMOUSESPEED};
     let p = p.sanitized();
     let mut accel: [i32; 3] = [p.threshold1, p.threshold2, p.acceleration];
-    let flags = if persist { SPIF_UPDATEINIFILE | SPIF_SENDCHANGE } else { SPIF_SENDCHANGE };
+    // No SPIF_SENDCHANGE: that flag makes the call broadcast WM_SETTINGCHANGE
+    // synchronously, which can stall this thread on another app's hung
+    // window. Other apps are told afterwards with a non-blocking notify.
+    let flags = if persist { SPIF_UPDATEINIFILE } else { SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0) };
     // SAFETY: SPI_SETMOUSE takes a pointer to three INTs; SPI_SETMOUSESPEED
     // takes the speed itself in pvParam (documented, not a pointer).
     unsafe {
         SystemParametersInfoW(SPI_SETMOUSE, 0, Some(accel.as_mut_ptr() as *mut _), flags).map_err(|e| format!("Acceleration: {e}"))?;
         SystemParametersInfoW(SPI_SETMOUSESPEED, 0, Some(p.speed as usize as *mut _), flags).map_err(|e| format!("Pointer speed: {e}"))?;
     }
+    notify_setting_change(SPI_SETMOUSE.0);
+    notify_setting_change(SPI_SETMOUSESPEED.0);
     Ok(())
+}
+
+/// Tell top-level windows that a system parameter changed without waiting
+/// for any of them (SendNotifyMessageW returns at once for other threads).
+fn notify_setting_change(action: u32) {
+    use windows::Win32::UI::WindowsAndMessaging::{SendNotifyMessageW, HWND_BROADCAST, WM_SETTINGCHANGE};
+    // SAFETY: broadcast of a documented message with integer parameters only.
+    unsafe {
+        let _ = SendNotifyMessageW(HWND_BROADCAST, WM_SETTINGCHANGE, WPARAM(action as usize), LPARAM(0));
+    }
+}
+
+/// The current Windows sign-in: logon session id plus boot time, so a
+/// journal written in an earlier sign-in is recognised as such.
+pub fn sign_in_session() -> Option<zeroin_core::winmouse::SignInSession> {
+    use windows::Win32::Foundation::{CloseHandle, HANDLE};
+    use windows::Win32::Security::{GetTokenInformation, TokenStatistics, TOKEN_QUERY, TOKEN_STATISTICS};
+    use windows::Win32::System::SystemInformation::GetTickCount64;
+    use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).ok()?.as_secs();
+    // SAFETY: the token handle is ours and closed below; the output buffer is
+    // a TOKEN_STATISTICS of the size passed.
+    unsafe {
+        let uptime = GetTickCount64() / 1000;
+        let mut token = HANDLE::default();
+        OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token).ok()?;
+        let mut stats = TOKEN_STATISTICS::default();
+        let mut len = 0u32;
+        let r = GetTokenInformation(
+            token,
+            TokenStatistics,
+            Some(&mut stats as *mut _ as *mut _),
+            std::mem::size_of::<TOKEN_STATISTICS>() as u32,
+            &mut len,
+        );
+        let _ = CloseHandle(token);
+        r.ok()?;
+        let luid = stats.AuthenticationId;
+        let logon = ((luid.HighPart as u32 as u64) << 32) | luid.LowPart as u64;
+        Some(zeroin_core::winmouse::SignInSession { boot_unix: now.saturating_sub(uptime), logon })
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -267,13 +326,27 @@ pub fn watch_session_end(on_end: fn()) {
             let wc =
                 WNDCLASSW { lpfnWndProc: Some(session_wndproc), hInstance: hinstance.into(), lpszClassName: class, ..Default::default() };
             RegisterClassW(&wc);
-            if CreateWindowExW(WS_EX_TOOLWINDOW, class, w!("ZeroIn"), WS_POPUP, 0, 0, 0, 0, None, None, Some(hinstance.into()), None)
-                .is_err()
+            // Not titled "ZeroIn", so the single-instance check finds only the main window.
+            if CreateWindowExW(
+                WS_EX_TOOLWINDOW,
+                class,
+                w!("ZeroIn session watcher"),
+                WS_POPUP,
+                0,
+                0,
+                0,
+                0,
+                None,
+                None,
+                Some(hinstance.into()),
+                None,
+            )
+            .is_err()
             {
                 return;
             }
             let mut msg = MSG::default();
-            while GetMessageW(&mut msg, None, 0, 0).as_bool() {
+            while GetMessageW(&mut msg, None, 0, 0).0 > 0 {
                 let _ = TranslateMessage(&msg);
                 DispatchMessageW(&msg);
             }
@@ -327,7 +400,7 @@ pub fn release_cursor() {
 pub fn local_offset_secs(unix: u64) -> Option<i64> {
     use windows::Win32::Foundation::{FILETIME, SYSTEMTIME};
     use windows::Win32::System::Time::{FileTimeToSystemTime, SystemTimeToFileTime, SystemTimeToTzSpecificLocalTimeEx};
-    let ticks = unix.checked_mul(10_000_000)? + 116_444_736_000_000_000;
+    let ticks = unix.checked_mul(10_000_000)?.checked_add(116_444_736_000_000_000)?;
     let ft = FILETIME { dwLowDateTime: ticks as u32, dwHighDateTime: (ticks >> 32) as u32 };
     let mut utc = SYSTEMTIME::default();
     let mut local = SYSTEMTIME::default();
@@ -351,4 +424,33 @@ pub(crate) fn open_url_impl(url: &str) -> bool {
     // SAFETY: all strings are valid, null-terminated HSTRINGs for the call's duration.
     let r = unsafe { ShellExecuteW(None, w!("open"), &file, PCWSTR::null(), PCWSTR::null(), SW_SHOWNORMAL) };
     r.0 as isize > 32
+}
+
+// ---------------------------------------------------------------------------
+// Single instance
+
+/// Claim the per-user "ZeroIn is running" mutex. Returns false when another
+/// ZeroIn already runs in this sign-in session; its window is then brought
+/// to the front. Two instances would overwrite each other's history.
+pub fn claim_single_instance() -> bool {
+    use windows::Win32::Foundation::{GetLastError, ERROR_ALREADY_EXISTS};
+    use windows::Win32::System::Threading::CreateMutexW;
+    use windows::Win32::UI::WindowsAndMessaging::{FindWindowW, IsIconic, SetForegroundWindow, ShowWindow, SW_RESTORE};
+    // SAFETY: plain Win32 calls; the mutex handle is intentionally kept open
+    // for the life of the process (Windows closes it at exit).
+    unsafe {
+        let Ok(_handle) = CreateMutexW(None, false, w!("Local\\ZeroIn.SingleInstance")) else {
+            return true; // cannot tell: do not block start-up
+        };
+        if GetLastError() != ERROR_ALREADY_EXISTS {
+            return true;
+        }
+        if let Ok(hwnd) = FindWindowW(PCWSTR::null(), w!("ZeroIn")) {
+            if IsIconic(hwnd).as_bool() {
+                let _ = ShowWindow(hwnd, SW_RESTORE);
+            }
+            let _ = SetForegroundWindow(hwnd);
+        }
+        false
+    }
 }

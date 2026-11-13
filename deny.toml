@@ -1,0 +1,50 @@
+# cargo-deny configuration: https://embarkstudios.github.io/cargo-deny/
+# Run with `cargo deny check` (CI runs it on every push).
+
+[graph]
+all-features = true
+
+[advisories]
+# Fail on any known vulnerability. Unmaintained crates are listed below
+# explicitly, each with the reason it is accepted.
+ignore = [
+    # zbus_names / zvariant / zvariant_derive: unmaintained, pulled in only by
+    # the Linux accessibility stack (accesskit_unix, via eframe). Not linked
+    # into the Windows build that ZeroIn ships. Revisit when eframe moves on.
+    { id = "RUSTSEC-2026-0370", reason = "Linux-only transitive dependency of eframe's accessibility support" },
+    { id = "RUSTSEC-2026-0371", reason = "Linux-only transitive dependency of eframe's accessibility support" },
+    { id = "RUSTSEC-2026-0372", reason = "Linux-only transitive dependency of eframe's accessibility support" },
+]
+
+[licenses]
+# Permissive licences only. Crates offering a copyleft licence as one option
+# of an OR (self_cell, r-efi) are accepted through their permissive option.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "0BSD",
+    "Unlicense",
+    "Unicode-3.0",
+    "OFL-1.1",
+    "Ubuntu-font-1.0",
+]
+confidence-threshold = 0.8
+
+[licenses.private]
+# The workspace crates themselves (publish = false) are MIT.
+ignore = true
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+allow-wildcard-paths = true
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

@@ -19,6 +19,10 @@ fn load_icon() -> eframe::egui::IconData {
 
 fn main() -> eframe::Result {
     platform::init_clock();
+    // One ZeroIn per sign-in: a second launch brings the first to the front.
+    if !platform::claim_single_instance() {
+        return Ok(());
+    }
     // Never leave the cursor confined if something goes wrong mid-drill.
     let default_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {

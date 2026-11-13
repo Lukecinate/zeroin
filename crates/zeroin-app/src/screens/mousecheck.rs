@@ -47,6 +47,28 @@ impl MouseCheck {
     fn claimed(&self) -> Option<u32> {
         CLAIMS.get(self.claim).copied().flatten()
     }
+
+    pub fn is_running(&self) -> bool {
+        matches!(self.phase, CheckPhase::Running { .. })
+    }
+
+    /// Stop a running capture without keeping its result. The capture thread
+    /// is joined, which hands mouse Raw Input back to the main input thread.
+    /// Returns true when a capture was running.
+    pub fn cancel_running(&mut self) -> bool {
+        if !self.is_running() {
+            return false;
+        }
+        if let CheckPhase::Running { check, .. } = std::mem::replace(&mut self.phase, CheckPhase::Idle) {
+            let _ = check.finish();
+        }
+        true
+    }
+
+    /// A capture may only run while its screen is on display.
+    pub fn must_stop(&self, on_screen: bool) -> bool {
+        self.is_running() && !on_screen
+    }
 }
 
 fn finish_capture(caps: Vec<CapReport>, claimed: Option<u32>) -> CheckDone {
@@ -427,4 +449,23 @@ fn histogram(ui: &mut egui::Ui, r: &CheckReport, w: f32) {
         TEXT_FAINT,
     );
     p.text(Pos2::new(inner.right(), rect.bottom() - 4.0), Align2::RIGHT_BOTTOM, format!("{}+", label(30)), regular(10.5), TEXT_FAINT);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn leaving_the_screen_stops_a_running_capture() {
+        // The development mock stands in for Raw Input off Windows.
+        std::env::set_var("ZEROIN_DEV_POLL", "1000:0.02");
+        let mut mc = MouseCheck { open: true, ..Default::default() };
+        mc.phase = CheckPhase::Running { check: PollCheck::start().expect("mock capture"), started_us: 0 };
+        assert!(!mc.must_stop(true), "keeps running while shown");
+        assert!(mc.must_stop(false), "must stop once the user navigates away");
+        assert!(mc.cancel_running());
+        assert!(matches!(mc.phase, CheckPhase::Idle));
+        assert!(!mc.cancel_running(), "second cancel is a no-op");
+        assert!(!mc.must_stop(false));
+    }
 }

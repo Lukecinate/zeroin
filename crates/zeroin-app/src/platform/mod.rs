@@ -15,6 +15,8 @@ mod poll_windows;
 #[cfg(windows)]
 pub use self::poll_windows::*;
 
+pub mod queue;
+
 #[cfg(not(windows))]
 mod fallback;
 #[cfg(not(windows))]

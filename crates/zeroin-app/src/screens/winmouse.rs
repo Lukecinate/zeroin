@@ -37,8 +37,23 @@ impl WinMouseUi {
     }
 }
 
-fn unix_now() -> u64 {
-    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
+use crate::screens::test::unix_now;
+
+/// What "Apply" backs up: the values Windows shows when the user confirms,
+/// not the ones read when the dialog opened (they may have changed since).
+#[derive(Debug, PartialEq)]
+enum ApplySource {
+    Fresh(MouseParams),
+    AlreadyNeutral,
+    Unreadable,
+}
+
+fn apply_source(now: Option<MouseParams>) -> ApplySource {
+    match now {
+        Some(c) if c.is_neutral() => ApplySource::AlreadyNeutral,
+        Some(c) => ApplySource::Fresh(c),
+        None => ApplySource::Unreadable,
+    }
 }
 
 fn describe(p: MouseParams) -> String {
@@ -86,7 +101,26 @@ impl ZeroInApp {
         r
     }
 
-    fn do_apply(&mut self, from: MouseParams) {
+    fn do_apply(&mut self, _opened_with: MouseParams) {
+        let from = match apply_source(platform::mouse_params()) {
+            ApplySource::Fresh(c) => c,
+            ApplySource::AlreadyNeutral => {
+                self.win_mouse.outcome = Some(Outcome {
+                    ok: true,
+                    title: "Already neutral".into(),
+                    body: "Enhance pointer precision is off and pointer speed is 10. Nothing to change.".into(),
+                });
+                return;
+            }
+            ApplySource::Unreadable => {
+                self.win_mouse.outcome = Some(Outcome {
+                    ok: false,
+                    title: "Nothing was changed".into(),
+                    body: "Windows pointer settings could not be read on this PC.".into(),
+                });
+                return;
+            }
+        };
         // Save the backup first; never change Windows settings without a way back.
         let backup = backup_for_apply(self.win_mouse.backup, from, unix_now());
         if let Err(e) = self.save_backup(backup) {
@@ -284,5 +318,20 @@ impl ZeroInApp {
                 }
             });
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn apply_backs_up_values_read_at_confirmation() {
+        let opened = MouseParams { threshold1: 6, threshold2: 10, acceleration: 1, speed: 10 };
+        let changed_since = MouseParams { speed: 14, ..opened };
+        let _ = opened;
+        assert_eq!(apply_source(Some(changed_since)), ApplySource::Fresh(changed_since));
+        assert_eq!(apply_source(Some(MouseParams::NEUTRAL)), ApplySource::AlreadyNeutral);
+        assert_eq!(apply_source(None), ApplySource::Unreadable);
     }
 }

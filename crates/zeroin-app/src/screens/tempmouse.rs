@@ -52,18 +52,91 @@ impl JournalStore for JournalFile {
     }
 }
 
-/// The active change, reachable from the panic hook and the sign-out thread.
-static ACTIVE: Mutex<Option<TempJournal>> = Mutex::new(None);
+/// State of the temporary change, shared with the panic hook and the
+/// sign-out thread. The lock is only ever held to read or swap this value:
+/// never across a Windows settings call or file I/O, so no thread can block
+/// another while it waits on Windows, and there is only one lock (no order).
+#[derive(Debug)]
+enum Slot<J> {
+    Idle,
+    /// The UI thread is writing the neutral values right now.
+    Applying,
+    /// A restore was requested while applying; the applier undoes its own
+    /// change as soon as it finishes.
+    CancelRequested,
+    Active(J),
+}
+
+/// What [`Slot`] says to do next. Pure, so the hand-over between threads is
+/// unit-tested without touching Windows.
+impl<J> Slot<J> {
+    /// UI thread, before applying. `Some(true)`: already active;
+    /// `Some(false)`: busy elsewhere; `None`: go ahead (now `Applying`).
+    fn begin(&mut self) -> Option<bool> {
+        match self {
+            Slot::Active(_) => Some(true),
+            Slot::Applying | Slot::CancelRequested => Some(false),
+            Slot::Idle => {
+                *self = Slot::Applying;
+                None
+            }
+        }
+    }
+
+    /// UI thread, after applying. Returns the journal back when a restore was
+    /// requested meanwhile, so the caller restores it at once.
+    fn finish(&mut self, applied: Option<J>) -> Option<J> {
+        let cancelled = matches!(self, Slot::CancelRequested);
+        match applied {
+            Some(j) if cancelled => {
+                *self = Slot::Idle;
+                Some(j)
+            }
+            Some(j) => {
+                *self = Slot::Active(j);
+                None
+            }
+            None => {
+                *self = Slot::Idle;
+                None
+            }
+        }
+    }
+
+    /// Any thread: take the active change for restoring.
+    fn take(&mut self) -> Option<J> {
+        match std::mem::replace(self, Slot::Idle) {
+            Slot::Active(j) => Some(j),
+            Slot::Applying | Slot::CancelRequested => {
+                *self = Slot::CancelRequested;
+                None
+            }
+            Slot::Idle => None,
+        }
+    }
+}
+
+static ACTIVE: Mutex<Slot<TempJournal>> = Mutex::new(Slot::Idle);
+
+/// Lock the slot. Critical sections are a few instructions and cannot
+/// panic, so waiting is bounded; `try_lock` with a short spin keeps the
+/// panic hook from ever blocking if the panic happened inside one.
+fn with_slot<R>(f: impl FnOnce(&mut Slot<TempJournal>) -> R) -> Option<R> {
+    for _ in 0..1000 {
+        match ACTIVE.try_lock() {
+            Ok(mut g) => return Some(f(&mut g)),
+            Err(TryLockError::Poisoned(p)) => return Some(f(&mut p.into_inner())),
+            Err(TryLockError::WouldBlock) => std::thread::yield_now(),
+        }
+    }
+    None
+}
 
 /// Put the user's settings back if a temporary change is active. Returns
 /// `None` when nothing was active. Safe to call from any thread.
 pub fn restore_now() -> Option<Result<(), String>> {
-    let mut guard = match ACTIVE.try_lock() {
-        Ok(g) => g,
-        Err(TryLockError::Poisoned(p)) => p.into_inner(),
-        Err(TryLockError::WouldBlock) => return None,
-    };
-    let j = guard.take()?;
+    let j = with_slot(|s| s.take()).flatten()?;
+    // Outside the lock: Windows and disk I/O.
     let r = end_temp(&mut ThisPc, &mut JournalFile, &j);
     // On failure the journal stays on disk and is replayed on next launch.
     Some(r)
@@ -79,18 +152,25 @@ pub struct TempMouseGuard(());
 
 impl TempMouseGuard {
     fn apply() -> Result<Option<TempMouseGuard>, String> {
-        let mut active = ACTIVE.lock().unwrap_or_else(|e| e.into_inner());
-        if active.is_some() {
-            return Ok(Some(TempMouseGuard(())));
+        match with_slot(|s| s.begin()) {
+            Some(Some(true)) => return Ok(Some(TempMouseGuard(()))),
+            Some(Some(false)) | None => return Ok(None),
+            Some(None) => {}
         }
-        match begin_temp(&mut ThisPc, &mut JournalFile, crate::screens::test::unix_now()) {
-            BeginTemp::Applied(j) => {
-                *active = Some(j);
-                Ok(Some(TempMouseGuard(())))
-            }
-            BeginTemp::AlreadyNeutral => Ok(None),
-            BeginTemp::Failed(e) => Err(e),
+        // Outside the lock: read, journal to disk, write, verify.
+        let outcome = begin_temp(&mut ThisPc, &mut JournalFile, crate::screens::test::unix_now(), platform::sign_in_session());
+        let (applied, result) = match outcome {
+            BeginTemp::Applied(j) => (Some(j), Ok(true)),
+            BeginTemp::AlreadyNeutral => (None, Ok(false)),
+            BeginTemp::Failed(e) => (None, Err(e)),
+        };
+        let undo = with_slot(|s| s.finish(applied)).unwrap_or(applied);
+        if let Some(j) = undo {
+            // Signed out (or the app is closing) while we were applying.
+            let _ = end_temp(&mut ThisPc, &mut JournalFile, &j);
+            return Ok(None);
         }
+        result.map(|on| on.then_some(TempMouseGuard(())))
     }
 
     /// Restore now and report the outcome.
@@ -150,7 +230,7 @@ impl ZeroInApp {
     /// Windows signing out.
     pub fn temp_mouse_startup(&mut self) {
         platform::watch_session_end(on_session_end);
-        match recover_temp(&mut ThisPc, &mut JournalFile) {
+        match recover_temp(&mut ThisPc, &mut JournalFile, crate::screens::test::unix_now(), platform::sign_in_session()) {
             Recovery::Restored(_) => {
                 self.refresh_system_info();
                 self.toast("Your Windows pointer settings from an interrupted test were restored.");
@@ -377,5 +457,42 @@ impl ZeroInApp {
             }
             Some(PointerDuringTest::AlreadyNeutral) | None => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Slot;
+
+    #[test]
+    fn restore_during_apply_is_honoured_by_the_applier() {
+        let mut s: Slot<u32> = Slot::Idle;
+        assert_eq!(s.begin(), None, "free: go ahead");
+        // Sign-out arrives while the UI thread is inside the Windows call.
+        assert_eq!(s.take(), None);
+        assert!(matches!(s, Slot::CancelRequested));
+        // The applier finishes and must undo at once.
+        assert_eq!(s.finish(Some(7)), Some(7));
+        assert!(matches!(s, Slot::Idle));
+    }
+
+    #[test]
+    fn normal_apply_then_restore_happens_once() {
+        let mut s: Slot<u32> = Slot::Idle;
+        assert_eq!(s.begin(), None);
+        assert_eq!(s.finish(Some(1)), None);
+        assert_eq!(s.begin(), Some(true), "already active");
+        assert_eq!(s.take(), Some(1));
+        assert_eq!(s.take(), None, "second restore (other thread) finds nothing");
+        assert!(matches!(s, Slot::Idle));
+    }
+
+    #[test]
+    fn busy_and_failed_apply() {
+        let mut s: Slot<u32> = Slot::Idle;
+        assert_eq!(s.begin(), None);
+        assert_eq!(s.begin(), Some(false), "a second applier backs off");
+        assert_eq!(s.finish(None), None);
+        assert!(matches!(s, Slot::Idle));
     }
 }

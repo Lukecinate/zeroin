@@ -8,7 +8,7 @@ use crate::screens::{result::ResultState, setup::SetupState, test::TestState};
 use crate::theme::*;
 use crate::widgets::{self, Icon};
 use eframe::egui::{self, Align2, Key, Pos2, Rect, Sense, Stroke, Vec2};
-use zeroin_core::history::{load_json, save_json, History, SavedTest, Settings};
+use zeroin_core::history::{load_json, load_json_guarded, save_json, Guarded, History, SavedTest, Settings};
 use zeroin_core::polling::{self, PollingStats};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -87,6 +87,10 @@ pub struct ZeroInApp {
     pub settings: Settings,
     pub history: History,
     pub history_error: Option<String>,
+    /// The history file exists but could not be read: never save over it.
+    history_save_blocked: bool,
+    /// Same for settings.
+    settings_save_blocked: bool,
     pub setup: SetupState,
     pub test: Option<TestState>,
     pub result: Option<ResultState>,
@@ -135,15 +139,28 @@ impl ZeroInApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         install(&cc.egui_ctx);
         egui_extras::install_image_loaders(&cc.egui_ctx);
-        let settings: Settings = load_json(&crate::paths::settings_file()).unwrap_or_default();
-        let (history, history_error) = match load_json::<History>(&crate::paths::history_file()) {
-            Ok(h) => (h, None),
-            Err(e) => {
-                // Keep the unreadable file aside instead of overwriting it.
-                let p = crate::paths::history_file();
-                let _ = std::fs::rename(&p, p.with_extension("json.unreadable"));
-                (History::default(), Some(format!("History file could not be read and was set aside ({e}).")))
-            }
+        let now = crate::screens::test::unix_now();
+        // Settings: a corrupt file is set aside (unique name) and defaults are
+        // used; a file that exists but cannot be read now is never overwritten.
+        let (settings, settings_save_blocked) = match load_json_guarded::<Settings>(&crate::paths::settings_file(), now) {
+            Guarded::Loaded(s) => (s, false),
+            Guarded::SetAside { .. } => (Settings::default(), false),
+            Guarded::Unavailable { .. } => (Settings::default(), true),
+        };
+        let (history, history_error, history_save_blocked) = match load_json_guarded::<History>(&crate::paths::history_file(), now) {
+            Guarded::Loaded(h) => (h, None, false),
+            Guarded::SetAside { moved_to, error } => (
+                History::default(),
+                Some(format!("History file could not be read and was kept as {} ({error}).", moved_to.display())),
+                false,
+            ),
+            Guarded::Unavailable { error } => (
+                History::default(),
+                Some(format!(
+                    "History file could not be opened ({error}). It was left untouched and new results are not saved until ZeroIn restarts."
+                )),
+                true,
+            ),
         };
         let llm = Llm::new(&cc.egui_ctx, settings.ai_enabled);
         let wooting = if settings.analog_keyboard_enabled { WootingAnalog::load() } else { Err("Turned off".into()) };
@@ -165,6 +182,8 @@ impl ZeroInApp {
             settings,
             history,
             history_error,
+            history_save_blocked,
+            settings_save_blocked,
             setup,
             test: None,
             result: None,
@@ -201,10 +220,17 @@ impl ZeroInApp {
     }
 
     pub fn save_settings(&self) {
+        if self.settings_save_blocked {
+            return;
+        }
         let _ = save_json(&crate::paths::settings_file(), &self.settings);
     }
 
     pub fn save_history(&mut self) {
+        if self.history_save_blocked {
+            self.toast("History not saved: the history file could not be opened at start-up");
+            return;
+        }
         if let Err(e) = save_json(&crate::paths::history_file(), &self.history) {
             self.toast(format!("Could not save history: {e}"));
         }
@@ -233,6 +259,10 @@ impl ZeroInApp {
 
     fn collect_input(&mut self, ctx: &egui::Context) {
         self.events.clear();
+        let focused = ctx.input(|i| i.focused);
+        // While unfocused the input thread drops reports instead of queueing
+        // them: an idle or minimized window gets no frames to drain the queue.
+        self.raw.set_accept(focused);
         self.raw.drain(&mut self.events);
         if !self.raw.is_native() {
             // Development fallback: window mouse events instead of raw input.
@@ -276,7 +306,6 @@ impl ZeroInApp {
             });
             self.fallback_frac = (fx, fy);
         }
-        let focused = ctx.input(|i| i.focused);
         if !focused {
             // RIDEV_INPUTSINK delivers input in the background too; ignore it then.
             self.events.clear();
@@ -382,6 +411,16 @@ impl ZeroInApp {
                 self.section = Section::Settings;
             }
         });
+    }
+
+    /// Check mouse holds the process's mouse Raw Input while it captures, so
+    /// it must never keep running behind another page (F1/F2, the rail or the
+    /// step bar), or drills would get no motion.
+    fn stop_hidden_mouse_check(&mut self) {
+        let on_screen = self.section == Section::Settings && self.mouse_check.open;
+        if self.mouse_check.must_stop(on_screen) && self.mouse_check.cancel_running() {
+            self.toast("Check mouse cancelled");
+        }
     }
 
     fn content(&mut self, ui: &mut egui::Ui) {
@@ -558,6 +597,7 @@ impl eframe::App for ZeroInApp {
         self.win_mouse_keys(&ctx);
         self.temp_mouse_keys(&ctx);
         self.global_keys(&ctx);
+        self.stop_hidden_mouse_check();
         self.page_keys(&ctx);
         self.apply_zoom(&ctx);
         self.update_vsync(frame);
@@ -607,6 +647,8 @@ impl eframe::App for ZeroInApp {
                 ctx.request_repaint_after(std::time::Duration::from_millis(50));
             }
         }
+        // The rail and the page itself can also navigate during this frame.
+        self.stop_hidden_mouse_check();
         self.sync_cursor(&ctx, window_hwnd(frame));
         self.sync_temp_mouse(&ctx);
         self.win_mouse_dialog(&ctx);

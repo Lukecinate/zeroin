@@ -206,7 +206,7 @@ impl Search {
 /// vertex when the parabola is concave and there are at least 3 distinct x.
 fn quadratic_vertex(obs: &[&Observation]) -> Option<f64> {
     let mut xs: Vec<f64> = obs.iter().map(|o| o.mult.ln()).collect();
-    xs.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    xs.sort_by(f64::total_cmp);
     xs.dedup_by(|a, b| (*a - *b).abs() < 1e-9);
     if xs.len() < 3 {
         return None;
@@ -216,6 +216,9 @@ fn quadratic_vertex(obs: &[&Observation]) -> Option<f64> {
     for o in obs {
         let x = o.mult.ln();
         let y = o.score.total;
+        if !x.is_finite() || !y.is_finite() {
+            return None;
+        }
         let row = [x * x, x, 1.0];
         for i in 0..3 {
             for j in 0..3 {
@@ -226,7 +229,7 @@ fn quadratic_vertex(obs: &[&Observation]) -> Option<f64> {
     }
     // Gaussian elimination with partial pivoting.
     for col in 0..3 {
-        let piv = (col..3).max_by(|&a, &b| m[a][col].abs().partial_cmp(&m[b][col].abs()).unwrap())?;
+        let piv = (col..3).max_by(|&a, &b| m[a][col].abs().total_cmp(&m[b][col].abs()))?;
         if m[piv][col].abs() < 1e-12 {
             return None;
         }
@@ -276,6 +279,22 @@ mod tests {
             let got = run(best);
             assert!((got / best - 1.0).abs() < 0.08, "best {best}, got {got}");
         }
+    }
+
+    #[test]
+    fn nan_scores_never_panic() {
+        // Release builds abort on panic; a NaN must degrade, not crash.
+        let mut s = Search::new(SearchConfig::default());
+        while !s.is_done() {
+            let c = s.candidates();
+            let nan = Score { total: f64::NAN, ..Default::default() };
+            s.record_round([synthetic(1.0, c[0]), nan, synthetic(1.0, c[2])]);
+        }
+        let _ = s.recommendation();
+        let o1 = Observation { round: 0, mult: 0.8, score: Score { total: 50.0, ..Default::default() } };
+        let o2 = Observation { round: 0, mult: 1.0, score: Score { total: f64::NAN, ..Default::default() } };
+        let o3 = Observation { round: 0, mult: 1.2, score: Score { total: 40.0, ..Default::default() } };
+        assert_eq!(quadratic_vertex(&[&o1, &o2, &o3]), None);
     }
 
     #[test]

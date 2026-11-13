@@ -15,7 +15,8 @@ pub fn data_dir() -> PathBuf {
     if let Some(h) = std::env::var_os("HOME") {
         return PathBuf::from(h).join(".local/share/zeroin");
     }
-    PathBuf::from(".zeroin")
+    // Never a path relative to the working directory.
+    std::env::temp_dir().join("zeroin")
 }
 
 pub fn history_file() -> PathBuf {

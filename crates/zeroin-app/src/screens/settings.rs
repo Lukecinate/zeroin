@@ -88,7 +88,10 @@ impl ZeroInApp {
                 if on {
                     self.llm.start(ui.ctx())
                 } else {
-                    self.llm.stop()
+                    self.llm.stop();
+                    if let Some(r) = self.result.as_mut() {
+                        r.explain_job = None;
+                    }
                 }
             }
             let detail = match &status {

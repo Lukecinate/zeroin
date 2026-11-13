@@ -4,6 +4,29 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [0.2.3] - 2026-11-13
+
+Reliability and safety fixes from a concurrency and lifetime audit. Layout and test behaviour are unchanged.
+
+### Fixed
+- **Memory growth while ZeroIn sat in the background.** Raw mouse and keyboard reports kept queueing while the window was unfocused or minimized and drew no frames (about 140 MB per hour at 1000 Hz, more at 8000 Hz). The input thread now drops reports while the window does not have focus, and the hand-off queue is bounded (about one second of 8000 Hz input).
+- **Local AI showed "ready" but never answered** after turning it off and on again while the model was loading or writing. Each start now gets its own status, the previous worker is cancelled and fully stopped before a new one starts (llama.cpp allows one backend per process), and an explanation that fails, is cancelled or takes longer than two minutes no longer leaves "writing…" on screen.
+- **Check mouse kept capturing after leaving the screen** with F1/F2/F3, the sidebar or the step bar, which took mouse input away from a test for up to 30 s. Leaving the screen now cancels the capture and gives mouse input back at once.
+- **History could be lost after two failed loads.** Only a file that is not valid JSON is set aside, under a new name such as `history.json.unreadable-1763020800` that never replaces an earlier copy. If the file exists but cannot be opened (locked by antivirus or sync software), it is left untouched and new results are not saved over it for that session. The same rule applies to `settings.json`.
+- **Data files survive a power cut.** JSON files are flushed to disk before they replace the previous version, and every write uses its own temporary file.
+- **Neutral pointer settings no longer wait on other apps.** Windows is told about the change with a notification that does not wait for other windows, so a hung app can no longer freeze ZeroIn at drill start or after alt-tab. The shared state for the temporary change is never locked while Windows or the disk is busy, and a sign-out during the change is honoured as soon as the change completes.
+- **Crash recovery is limited to the same Windows sign-in** and to journals less than a day old, so ZeroIn never "restores" old values over a choice made after signing out.
+- **Apply to Windows** backs up the values Windows shows when you confirm, not the ones read when the dialog opened.
+
+### Changed
+- Only one ZeroIn runs per Windows sign-in; starting it again brings the open window to the front (two copies would overwrite each other's history).
+- The Wooting Analog SDK is loaded only from its install folder (`%ProgramFiles%\WootingAnalogSDK`), the Windows system folder or ZeroIn's folder, never through `PATH`.
+
+### Development
+- Regression tests for the bounded input queue, AI restart, Check mouse cancel, history set-aside, durable writes, the temporary-settings hand-over between threads, sign-in-scoped recovery and NaN-safe search.
+- `deny.toml` (permissive licence allow-list, advisories, sources) checked by `cargo deny` in CI. GitHub Actions are pinned to commit SHAs on Node 24 releases, with Dependabot keeping them current.
+- Raw input is read through an aligned buffer with `read_unaligned`; message loops stop on `GetMessageW` errors; small overflow and clock-skew guards.
+
 ## [0.2.2] - 2026-11-11
 
 ### Fixed

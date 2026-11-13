@@ -13,6 +13,8 @@ impl RawInput {
         false
     }
     pub fn drain(&self, _out: &mut Vec<InputEvent>) {}
+
+    pub fn set_accept(&self, _on: bool) {}
 }
 
 pub fn mouse_settings() -> Option<MouseSettings> {
@@ -69,6 +71,10 @@ pub fn set_mouse_params_session(p: zeroin_core::winmouse::MouseParams) -> Result
 
 /// No sign-out notice off Windows.
 pub fn watch_session_end(_on_end: fn()) {}
+
+pub fn sign_in_session() -> Option<zeroin_core::winmouse::SignInSession> {
+    None
+}
 
 pub fn confine_cursor(_hwnd: isize) {}
 
@@ -142,4 +148,9 @@ pub fn device_identity(_device: u64) -> Option<super::DeviceIdentity> {
 
 pub(crate) fn open_url_impl(url: &str) -> bool {
     std::process::Command::new("xdg-open").arg(url).spawn().is_ok()
+}
+
+/// Development builds off Windows do not limit instances.
+pub fn claim_single_instance() -> bool {
+    true
 }

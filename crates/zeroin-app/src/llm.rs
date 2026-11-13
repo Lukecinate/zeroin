@@ -6,8 +6,11 @@
 
 use eframe::egui;
 use std::path::PathBuf;
-use std::sync::mpsc::{channel, Receiver, Sender};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{channel, Receiver, Sender, TryRecvError};
 use std::sync::{Arc, Mutex};
+use std::thread::JoinHandle;
+use std::time::{Duration, Instant};
 
 #[derive(Clone, Debug, PartialEq)]
 #[cfg_attr(not(feature = "llm"), allow(dead_code))]
@@ -61,20 +64,49 @@ pub struct Reply {
     pub text: Result<String, String>,
 }
 
+/// A reply that has not arrived after this long is reported as failed, so
+/// the result screen never waits forever.
+pub const JOB_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// Everything one worker generation owns. Each start gets a fresh status
+/// slot and cancel flag, so a worker that is still winding down after the
+/// toggle went off can never overwrite the state of its successor.
+#[cfg_attr(not(feature = "llm"), allow(dead_code))]
+struct WorkerArgs {
+    path: PathBuf,
+    status: Arc<Mutex<LlmStatus>>,
+    jobs: Receiver<Job>,
+    replies: Sender<Reply>,
+    cancel: Arc<AtomicBool>,
+    ctx: egui::Context,
+}
+
+type Spawner = fn(WorkerArgs) -> std::io::Result<JoinHandle<()>>;
+
 pub struct Llm {
     status: Arc<Mutex<LlmStatus>>,
     tx: Option<Sender<Job>>,
     rx: Option<Receiver<Reply>>,
     next_id: u64,
     pub model_path: Option<PathBuf>,
+    /// Current worker, or the previous one while it is still exiting.
+    worker: Option<JoinHandle<()>>,
+    cancel: Arc<AtomicBool>,
+    /// A start was requested while the previous worker still runs; it is
+    /// spawned from `poll` once that worker has exited (llama.cpp allows only
+    /// one backend per process).
+    deferred: Option<(PathBuf, egui::Context)>,
+    /// Jobs sent and not yet answered, with the time they were sent.
+    pending: Vec<(u64, JobKind, Instant)>,
+    spawner: Spawner,
+    preflight: bool,
 }
 
 impl Llm {
     pub const COMPILED: bool = cfg!(feature = "llm");
 
     pub fn new(ctx: &egui::Context, enabled: bool) -> Self {
-        let mut me =
-            Llm { status: Arc::new(Mutex::new(LlmStatus::Off)), tx: None, rx: None, next_id: 1, model_path: crate::paths::find_model() };
+        let mut me = Self::with_spawner(spawn_worker, crate::paths::find_model(), true);
         if enabled {
             me.start(ctx);
         } else if !Self::COMPILED {
@@ -83,10 +115,24 @@ impl Llm {
         me
     }
 
-    fn set(&self, s: LlmStatus) {
-        if let Ok(mut g) = self.status.lock() {
-            *g = s;
+    fn with_spawner(spawner: Spawner, model_path: Option<PathBuf>, preflight: bool) -> Self {
+        Llm {
+            status: Arc::new(Mutex::new(LlmStatus::Off)),
+            tx: None,
+            rx: None,
+            next_id: 1,
+            model_path,
+            worker: None,
+            cancel: Arc::new(AtomicBool::new(false)),
+            deferred: None,
+            pending: Vec::new(),
+            spawner,
+            preflight,
         }
+    }
+
+    fn set(&self, s: LlmStatus) {
+        set_status(&self.status, s);
     }
 
     pub fn status(&self) -> LlmStatus {
@@ -95,41 +141,64 @@ impl Llm {
 
     /// Start (or restart) the worker when enabled in Settings.
     pub fn start(&mut self, ctx: &egui::Context) {
-        if self.tx.is_some() {
+        if self.tx.is_some() || self.deferred.is_some() {
             return;
         }
-        if !Self::COMPILED {
-            self.set(LlmStatus::NotCompiled);
-            return;
-        }
-        if !cpu_supported() {
-            self.set(LlmStatus::Failed("this CPU lacks AVX2/FMA, which the bundled model runtime needs".into()));
-            return;
-        }
-        self.model_path = crate::paths::find_model();
-        let Some(path) = self.model_path.clone() else {
+        // A fresh status slot: nothing the previous worker writes can reach it.
+        self.status = Arc::new(Mutex::new(LlmStatus::Off));
+        let path = if self.preflight {
+            if !Self::COMPILED {
+                self.set(LlmStatus::NotCompiled);
+                return;
+            }
+            if !cpu_supported() {
+                self.set(LlmStatus::Failed("this CPU lacks AVX2/FMA, which the bundled model runtime needs".into()));
+                return;
+            }
+            self.model_path = crate::paths::find_model();
+            self.model_path.clone()
+        } else {
+            self.model_path.clone()
+        };
+        let Some(path) = path else {
             self.set(LlmStatus::NotInstalled);
             return;
         };
-        let (jtx, jrx) = channel::<Job>();
-        let (rtx, rrx) = channel::<Reply>();
         self.set(LlmStatus::Loading);
-        let status = self.status.clone();
-        let ctx = ctx.clone();
-        let spawned = std::thread::Builder::new().name("zeroin-llm".into()).spawn(move || worker(path, status, jrx, rtx, ctx));
-        if spawned.is_err() {
-            self.set(LlmStatus::Failed("could not start thread".into()));
+        if self.worker.as_ref().is_some_and(|h| !h.is_finished()) {
+            self.deferred = Some((path, ctx.clone()));
             return;
         }
-        self.tx = Some(jtx);
-        self.rx = Some(rrx);
+        self.spawn(path, ctx.clone());
     }
 
-    /// Stop the worker (Settings toggle off). The thread exits after its current job.
+    fn spawn(&mut self, path: PathBuf, ctx: egui::Context) {
+        if let Some(old) = self.worker.take() {
+            let _ = old.join();
+        }
+        let (jtx, jrx) = channel::<Job>();
+        let (rtx, rrx) = channel::<Reply>();
+        self.cancel = Arc::new(AtomicBool::new(false));
+        let args = WorkerArgs { path, status: self.status.clone(), jobs: jrx, replies: rtx, cancel: self.cancel.clone(), ctx };
+        match (self.spawner)(args) {
+            Ok(h) => {
+                self.worker = Some(h);
+                self.tx = Some(jtx);
+                self.rx = Some(rrx);
+            }
+            Err(_) => self.set(LlmStatus::Failed("could not start thread".into())),
+        }
+    }
+
+    /// Stop the worker (Settings toggle off). The current generation is
+    /// cancelled; the thread exits on its own and is joined before the next start.
     pub fn stop(&mut self) {
+        self.cancel.store(true, Ordering::SeqCst);
         self.tx = None;
         self.rx = None;
-        self.set(LlmStatus::Off);
+        self.deferred = None;
+        self.pending.clear();
+        self.status = Arc::new(Mutex::new(LlmStatus::Off));
     }
 
     /// Queue a job. Returns its id, or `None` when the model is not ready.
@@ -140,11 +209,63 @@ impl Llm {
         let id = self.next_id;
         self.next_id += 1;
         self.tx.as_ref()?.send(Job { id, kind, prompt, max_tokens }).ok()?;
+        self.pending.push((id, kind, Instant::now()));
         Some(id)
     }
 
-    pub fn poll(&self) -> Vec<Reply> {
-        self.rx.as_ref().map(|r| r.try_iter().collect()).unwrap_or_default()
+    /// Replies that arrived, plus an `Err` reply for every job whose worker is
+    /// gone or that timed out. Also starts a deferred worker once the
+    /// previous one has exited.
+    pub fn poll(&mut self) -> Vec<Reply> {
+        self.poll_at(Instant::now())
+    }
+
+    fn poll_at(&mut self, now: Instant) -> Vec<Reply> {
+        if self.deferred.is_some() && self.worker.as_ref().is_none_or(|h| h.is_finished()) {
+            if let Some((path, ctx)) = self.deferred.take() {
+                self.spawn(path, ctx);
+            }
+        }
+        let mut out = Vec::new();
+        let mut gone = false;
+        if let Some(rx) = &self.rx {
+            loop {
+                match rx.try_recv() {
+                    Ok(r) => out.push(r),
+                    Err(TryRecvError::Empty) => break,
+                    Err(TryRecvError::Disconnected) => {
+                        gone = true;
+                        break;
+                    }
+                }
+            }
+        }
+        self.pending.retain(|(id, _, _)| !out.iter().any(|r| r.id == *id));
+        let mut failed = Vec::new();
+        self.pending.retain(|&(id, kind, since)| {
+            let why = if gone {
+                Some("the local AI stopped")
+            } else if now.duration_since(since) >= JOB_TIMEOUT {
+                Some("the local AI took too long")
+            } else {
+                None
+            };
+            match why {
+                Some(w) => {
+                    failed.push(Reply { id, kind, text: Err(w.into()) });
+                    false
+                }
+                None => true,
+            }
+        });
+        out.extend(failed);
+        out
+    }
+}
+
+fn set_status(status: &Mutex<LlmStatus>, s: LlmStatus) {
+    if let Ok(mut g) = status.lock() {
+        *g = s;
     }
 }
 
@@ -163,24 +284,28 @@ fn cpu_supported() -> bool {
     }
 }
 
+fn spawn_worker(args: WorkerArgs) -> std::io::Result<JoinHandle<()>> {
+    std::thread::Builder::new().name("zeroin-llm".into()).spawn(move || {
+        let ctx = args.ctx.clone();
+        worker(args);
+        // Wake the UI so a deferred start can proceed without waiting for input.
+        ctx.request_repaint();
+    })
+}
+
 #[cfg(not(feature = "llm"))]
-fn worker(_path: PathBuf, status: Arc<Mutex<LlmStatus>>, _rx: Receiver<Job>, _tx: Sender<Reply>, _ctx: egui::Context) {
-    if let Ok(mut g) = status.lock() {
-        *g = LlmStatus::NotCompiled;
-    }
+fn worker(args: WorkerArgs) {
+    set_status(&args.status, LlmStatus::NotCompiled);
 }
 
 #[cfg(feature = "llm")]
-fn worker(path: PathBuf, status: Arc<Mutex<LlmStatus>>, rx: Receiver<Job>, tx: Sender<Reply>, ctx: egui::Context) {
+fn worker(args: WorkerArgs) {
     use llama_cpp_2::llama_backend::LlamaBackend;
     use llama_cpp_2::model::params::LlamaModelParams;
     use llama_cpp_2::model::LlamaModel;
 
-    let set = |s: LlmStatus| {
-        if let Ok(mut g) = status.lock() {
-            *g = s;
-        }
-    };
+    let WorkerArgs { path, status, jobs, replies, cancel, ctx } = args;
+    let set = |s: LlmStatus| set_status(&status, s);
     let mut backend = match LlamaBackend::init() {
         Ok(b) => b,
         Err(e) => {
@@ -199,16 +324,21 @@ fn worker(path: PathBuf, status: Arc<Mutex<LlmStatus>>, rx: Receiver<Job>, tx: S
             return;
         }
     };
+    if cancel.load(Ordering::SeqCst) {
+        return;
+    }
     let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
     set(LlmStatus::Ready { model: name });
     ctx.request_repaint();
-    for job in rx.iter() {
-        let text = generate(&backend, &model, &job.prompt, job.max_tokens);
-        if tx.send(Reply { id: job.id, kind: job.kind, text }).is_err() {
+    for job in jobs.iter() {
+        let text = generate(&backend, &model, &job.prompt, job.max_tokens, &cancel);
+        if replies.send(Reply { id: job.id, kind: job.kind, text }).is_err() || cancel.load(Ordering::SeqCst) {
             break;
         }
         ctx.request_repaint();
     }
+    // `model` drops before `backend`, which frees the process-wide backend
+    // so the next worker can initialise it again.
 }
 
 #[cfg(feature = "llm")]
@@ -217,6 +347,7 @@ fn generate(
     model: &llama_cpp_2::model::LlamaModel,
     prompt: &str,
     max_tokens: usize,
+    cancel: &AtomicBool,
 ) -> Result<String, String> {
     use llama_cpp_2::context::params::LlamaContextParams;
     use llama_cpp_2::llama_batch::LlamaBatch;
@@ -254,6 +385,9 @@ fn generate(
     let mut pos = batch.n_tokens();
     let mut out: Vec<u8> = Vec::new();
     for _ in 0..max_tokens {
+        if cancel.load(Ordering::SeqCst) {
+            return Err("cancelled".into());
+        }
         let tok = sampler.sample(&lctx, batch.n_tokens() - 1);
         if vocab.is_eog(tok) {
             break;
@@ -265,4 +399,111 @@ fn generate(
         lctx.decode(&mut batch).map_err(|x| e(&x))?;
     }
     Ok(String::from_utf8_lossy(&out).into_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::AtomicUsize;
+
+    // A stand-in for llama.cpp: at most one live backend per process, a slow
+    // load, and replies that echo the prompt.
+    static LIVE: AtomicBool = AtomicBool::new(false);
+    static INITS: AtomicUsize = AtomicUsize::new(0);
+    static TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    fn fake_spawner(args: WorkerArgs) -> std::io::Result<JoinHandle<()>> {
+        std::thread::Builder::new().name("fake-llm".into()).spawn(move || {
+            let WorkerArgs { status, jobs, replies, cancel, .. } = args;
+            if LIVE.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst).is_err() {
+                set_status(&status, LlmStatus::Failed("BackendAlreadyInitialized".into()));
+                return;
+            }
+            INITS.fetch_add(1, Ordering::SeqCst);
+            std::thread::sleep(Duration::from_millis(150)); // model load
+            if !cancel.load(Ordering::SeqCst) {
+                set_status(&status, LlmStatus::Ready { model: "fake.gguf".into() });
+                for job in jobs.iter() {
+                    if cancel.load(Ordering::SeqCst) || replies.send(Reply { id: job.id, kind: job.kind, text: Ok(job.prompt) }).is_err() {
+                        break;
+                    }
+                }
+            }
+            LIVE.store(false, Ordering::SeqCst);
+        })
+    }
+
+    fn llm() -> Llm {
+        Llm::with_spawner(fake_spawner, Some(PathBuf::from("fake.gguf")), false)
+    }
+
+    fn wait_until(llm: &mut Llm, mut f: impl FnMut(&LlmStatus) -> bool) -> LlmStatus {
+        let t0 = Instant::now();
+        loop {
+            let _ = llm.poll();
+            let s = llm.status();
+            if f(&s) || t0.elapsed() > Duration::from_secs(5) {
+                return s;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    #[test]
+    fn toggling_off_and_on_while_loading_ends_ready_and_working() {
+        let _g = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let ctx = egui::Context::default();
+        let mut l = llm();
+        l.start(&ctx);
+        assert_eq!(l.status(), LlmStatus::Loading);
+        // Off and on again while the first worker is still "loading".
+        l.stop();
+        assert_eq!(l.status(), LlmStatus::Off);
+        l.start(&ctx);
+        assert_eq!(l.status(), LlmStatus::Loading);
+        let s = wait_until(&mut l, |s| !matches!(s, LlmStatus::Loading));
+        assert!(s.is_ready(), "expected Ready, got {s:?}");
+        // And it really answers.
+        let id = l.submit(JobKind::Explain, "hello".into(), 10).expect("submit");
+        let t0 = Instant::now();
+        let reply = loop {
+            if let Some(r) = l.poll().into_iter().find(|r| r.id == id) {
+                break r;
+            }
+            assert!(t0.elapsed() < Duration::from_secs(5), "no reply");
+            std::thread::sleep(Duration::from_millis(5));
+        };
+        assert_eq!(reply.text.as_deref(), Ok("hello"));
+        l.stop();
+    }
+
+    #[test]
+    fn old_worker_cannot_overwrite_new_status() {
+        let _g = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let ctx = egui::Context::default();
+        let mut l = llm();
+        l.start(&ctx);
+        l.stop();
+        // Stays Off even after the old worker would have finished loading.
+        std::thread::sleep(Duration::from_millis(300));
+        let _ = l.poll();
+        assert_eq!(l.status(), LlmStatus::Off);
+    }
+
+    #[test]
+    fn pending_job_fails_when_worker_stops_or_times_out() {
+        let _g = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let ctx = egui::Context::default();
+        let mut l = llm();
+        l.start(&ctx);
+        assert!(wait_until(&mut l, |s| s.is_ready()).is_ready());
+        // Simulate a job the worker never answers.
+        l.pending.push((999, JobKind::Explain, Instant::now()));
+        let later = Instant::now() + JOB_TIMEOUT + Duration::from_secs(1);
+        let replies = l.poll_at(later);
+        let r = replies.iter().find(|r| r.id == 999).expect("timeout reply");
+        assert!(r.text.is_err());
+        assert!(l.pending.is_empty());
+        l.stop();
+    }
 }

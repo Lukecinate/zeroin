@@ -4270,7 +4270,7 @@ dependencies = [
 
 [[package]]
 name = "zeroin-app"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "eframe",
  "egui_extras",
@@ -4286,7 +4286,7 @@ dependencies = [
 
 [[package]]
 name = "zeroin-core"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "serde",
  "serde_json",

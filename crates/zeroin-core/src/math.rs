@@ -5,6 +5,17 @@ use crate::games::GameProfile;
 /// Centimetres per inch.
 pub const CM_PER_INCH: f64 = 2.54;
 
+/// Median of `v` (sorted in place). `None` when empty. The one shared
+/// implementation for history, polling and scoring.
+pub fn median_in_place(v: &mut [f64]) -> Option<f64> {
+    if v.is_empty() {
+        return None;
+    }
+    v.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let n = v.len();
+    Some(if n % 2 == 1 { v[n / 2] } else { 0.5 * (v[n / 2 - 1] + v[n / 2]) })
+}
+
 /// Physical mouse travel (cm) for one full 360° turn.
 pub fn cm_per_360(dpi: f64, deg_per_count: f64) -> f64 {
     inches_per_360(dpi, deg_per_count) * CM_PER_INCH

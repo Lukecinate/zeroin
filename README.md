@@ -52,7 +52,7 @@ A portable zip without the model is also published. To add the model to the port
 Verify downloads with `SHA256SUMS.txt` from the same release:
 
 ```powershell
-Get-FileHash .\ZeroIn-Setup-0.2.2-x64.exe -Algorithm SHA256
+Get-FileHash .\ZeroIn-Setup-0.2.3-x64.exe -Algorithm SHA256
 ```
 
 ### Requirements
@@ -104,7 +104,7 @@ Releases are built by GitHub Actions on `windows-latest` from a version tag ([re
 
 ## Status
 
-Version 0.2.2. See [CHANGELOG.md](CHANGELOG.md) for what is included.
+Version 0.2.3. See [CHANGELOG.md](CHANGELOG.md) for what is included.
 
 ### Known issues
 

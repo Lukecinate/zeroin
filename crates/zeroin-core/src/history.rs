@@ -9,7 +9,7 @@ use crate::gear::Gear;
 use crate::search::{Observation, RecommendationMethod};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// Current history schema version.
 pub const HISTORY_VERSION: u32 = 1;
@@ -160,9 +160,8 @@ pub fn by_pad(sessions: &[Session]) -> Vec<PadSummary> {
     let mut out: Vec<PadSummary> = groups
         .into_iter()
         .map(|(label, mut v)| {
-            v.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
             let n = v.len();
-            let median = if n % 2 == 1 { v[n / 2] } else { 0.5 * (v[n / 2 - 1] + v[n / 2]) };
+            let median = crate::math::median_in_place(&mut v).unwrap_or(0.0);
             PadSummary { label, count: n, median_cm360: median, min_cm360: v[0], max_cm360: v[n - 1] }
         })
         .collect();
@@ -287,6 +286,8 @@ impl SavedTest {
     pub fn is_resumable(&self, now_unix: u64) -> bool {
         self.version == SAVED_TEST_VERSION
             && now_unix.saturating_sub(self.saved_unix) <= RESUME_MAX_AGE_S
+            // Saved "in the future" (clock moved back): do not keep it alive.
+            && self.saved_unix <= now_unix.saturating_add(3600)
             && !self.search.is_done()
             && self.search.blocks_done() > 0
     }
@@ -301,15 +302,109 @@ pub fn load_json<T: DeserializeOwned + Default>(path: &Path) -> io::Result<T> {
     }
 }
 
-/// Write JSON atomically: write a temporary sibling, then rename over the target.
+/// Write JSON atomically and durably: write a uniquely named temporary
+/// sibling, flush it to disk, then rename it over the target. A power cut
+/// leaves either the old or the new file, never an empty one, and two
+/// writers never share a temporary file.
 pub fn save_json<T: Serialize>(path: &Path, value: &T) -> io::Result<()> {
+    use std::io::Write;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEQ: AtomicU64 = AtomicU64::new(0);
     if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir)?;
+        if !dir.as_os_str().is_empty() {
+            std::fs::create_dir_all(dir)?;
+        }
     }
-    let tmp = path.with_extension("json.tmp");
     let bytes = serde_json::to_vec_pretty(value).map_err(io::Error::other)?;
-    std::fs::write(&tmp, bytes)?;
-    std::fs::rename(&tmp, path)
+    let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "data.json".into());
+    let tmp = path.with_file_name(format!("{name}.{}-{}.tmp", std::process::id(), SEQ.fetch_add(1, Ordering::Relaxed)));
+    let res = (|| {
+        let mut f = std::fs::OpenOptions::new().write(true).create_new(true).open(&tmp)?;
+        f.write_all(&bytes)?;
+        f.sync_all()?;
+        drop(f);
+        std::fs::rename(&tmp, path)
+    })();
+    if res.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    res
+}
+
+/// Result of loading a file whose contents must never be lost (history).
+pub enum Guarded<T> {
+    /// Loaded, or the file does not exist yet.
+    Loaded(T),
+    /// The file is not valid JSON for this version. It was copied to
+    /// `moved_to` (a new, unique name; nothing is overwritten) and removed.
+    SetAside {
+        /// Where the unreadable file now is.
+        moved_to: PathBuf,
+        /// Why it could not be read.
+        error: String,
+    },
+    /// The file exists but could not be read right now (locked by antivirus
+    /// or sync software, permissions, network profile). It was left untouched;
+    /// the caller must not save over it this session.
+    Unavailable {
+        /// Why it could not be read.
+        error: String,
+    },
+}
+
+impl<T> std::fmt::Debug for Guarded<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Guarded::Loaded(_) => write!(f, "Loaded"),
+            Guarded::SetAside { moved_to, error } => write!(f, "SetAside({}, {error})", moved_to.display()),
+            Guarded::Unavailable { error } => write!(f, "Unavailable({error})"),
+        }
+    }
+}
+
+/// Load `path`; corrupt files are set aside under a unique name such as
+/// `history.json.unreadable-1763020800`, other errors leave the file alone.
+pub fn load_json_guarded<T: DeserializeOwned + Default>(path: &Path, now_unix: u64) -> Guarded<T> {
+    let bytes = match std::fs::read(path) {
+        Ok(b) => b,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Guarded::Loaded(T::default()),
+        Err(e) => return Guarded::Unavailable { error: e.to_string() },
+    };
+    let parse_err = match serde_json::from_slice::<T>(&bytes) {
+        Ok(v) => return Guarded::Loaded(v),
+        Err(e) => e.to_string(),
+    };
+    match set_aside(path, &bytes, now_unix) {
+        Ok(moved_to) => Guarded::SetAside { moved_to, error: parse_err },
+        // Could not make a safe copy: leave the original where it is.
+        Err(e) => Guarded::Unavailable { error: format!("{parse_err}; could not set it aside: {e}") },
+    }
+}
+
+/// Copy `bytes` to a new `<name>.unreadable-<unix>[-n]` next to `path`
+/// (create-new, so an earlier copy is never replaced), then remove `path`.
+fn set_aside(path: &Path, bytes: &[u8], now_unix: u64) -> io::Result<PathBuf> {
+    use std::io::Write;
+    let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "data.json".into());
+    for n in 0..1000u32 {
+        let candidate = if n == 0 {
+            path.with_file_name(format!("{name}.unreadable-{now_unix}"))
+        } else {
+            path.with_file_name(format!("{name}.unreadable-{now_unix}-{n}"))
+        };
+        match std::fs::OpenOptions::new().write(true).create_new(true).open(&candidate) {
+            Ok(mut f) => {
+                f.write_all(bytes)?;
+                f.sync_all()?;
+                drop(f);
+                std::fs::remove_file(path)?;
+                return Ok(candidate);
+            }
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e),
+        }
+    }
+    Err(io::Error::new(io::ErrorKind::AlreadyExists, "too many set-aside copies"))
 }
 
 #[cfg(test)]
@@ -325,6 +420,62 @@ mod tests {
         ));
         std::fs::create_dir_all(&d).unwrap();
         d
+    }
+
+    #[test]
+    fn corrupt_history_is_set_aside_and_never_overwrites_an_earlier_copy() {
+        let d = tmpdir();
+        let p = d.join("history.json");
+        std::fs::write(&p, b"{ not json").unwrap();
+        let first = match load_json_guarded::<History>(&p, 1_000) {
+            Guarded::SetAside { moved_to, .. } => moved_to,
+            other => panic!("expected SetAside, got {other:?}"),
+        };
+        assert!(!p.exists());
+        assert_eq!(std::fs::read(&first).unwrap(), b"{ not json");
+        // Second bad file in the same second: a new name, the first copy survives.
+        std::fs::write(&p, b"second bad").unwrap();
+        let second = match load_json_guarded::<History>(&p, 1_000) {
+            Guarded::SetAside { moved_to, .. } => moved_to,
+            other => panic!("expected SetAside, got {other:?}"),
+        };
+        assert_ne!(first, second);
+        assert_eq!(std::fs::read(&first).unwrap(), b"{ not json");
+        assert_eq!(std::fs::read(&second).unwrap(), b"second bad");
+    }
+
+    #[test]
+    fn unreadable_history_is_left_untouched() {
+        let d = tmpdir();
+        // A directory where the file should be: reading fails with an I/O
+        // error that is not "invalid data", like a sharing violation.
+        let p = d.join("history.json");
+        std::fs::create_dir_all(&p).unwrap();
+        match load_json_guarded::<History>(&p, 1_000) {
+            Guarded::Unavailable { .. } => {}
+            other => panic!("expected Unavailable, got {other:?}"),
+        }
+        assert!(p.exists());
+        assert_eq!(std::fs::read_dir(&d).unwrap().count(), 1, "nothing renamed or created");
+    }
+
+    #[test]
+    fn missing_history_loads_default() {
+        let d = tmpdir();
+        assert!(matches!(load_json_guarded::<History>(&d.join("history.json"), 1), Guarded::Loaded(_)));
+    }
+
+    #[test]
+    fn save_json_leaves_no_temp_files_and_round_trips() {
+        let d = tmpdir();
+        let p = d.join("settings.json");
+        for i in 0..5u32 {
+            save_json(&p, &vec![i; 3]).unwrap();
+        }
+        let back: Vec<u32> = load_json(&p).unwrap();
+        assert_eq!(back, vec![4, 4, 4]);
+        let names: Vec<_> = std::fs::read_dir(&d).unwrap().map(|e| e.unwrap().file_name()).collect();
+        assert_eq!(names.len(), 1, "only the target remains: {names:?}");
     }
 
     fn session(id: &str) -> Session {
@@ -487,6 +638,10 @@ mod tests {
         assert_eq!(back.pair_seed, 42);
         assert!(back.is_resumable(300));
         assert!(!back.is_resumable(200 + RESUME_MAX_AGE_S + 1));
+        // Clock moved back by more than an hour: not kept alive past 24 h.
+        let mut back = back;
+        back.saved_unix = 100_000;
+        assert!(!back.is_resumable(300));
         std::fs::remove_dir_all(d).ok();
     }
 
