@@ -1,0 +1,3 @@
+# Patterns for TruffleHog --exclude-paths (current-tree scan).
+\.git/
+(^|/)target/

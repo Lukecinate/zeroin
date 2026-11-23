@@ -165,7 +165,7 @@ mod url_tests {
             "http://example.com/",
             "HTTPS://example.com/",
             "https://example.com/ path",
-            "https://user:pass@example.com/",
+            "https://name@example.com/",
             r"https://example.com/\windows",
             "https://example.com/<script>",
             "https://.example.com/",

@@ -36,9 +36,19 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
-      # Action commit and CLI version are both pinned. --no-verification keeps
-      # candidate secrets on the runner (they are not sent to detector APIs).
-      - uses: trufflesecurity/trufflehog@d232362a64a09a9e7d58267b8f5acef00ae90e23 # v3.100.0
-        with:
-          version: v3.100.0
-          extra_args: --no-update --no-verification --fail --results=unverified,unknown
+      # Pinned binary (the action's container tag v3.100.0 was not published).
+      # --no-verification keeps candidate secrets on the runner.
+      - name: Install TruffleHog v3.100.0
+        run: |
+          set -euo pipefail
+          curl -sSL -o /tmp/trufflehog.tgz https://github.com/trufflesecurity/trufflehog/releases/download/v3.100.0/trufflehog_3.100.0_linux_amd64.tar.gz
+          echo "b2d85eba59865e98f45c9fc9f77d2c6d62df529fdd5755af121304ea5a7cecbb  /tmp/trufflehog.tgz" | sha256sum -c
+          sudo tar -C /usr/local/bin -xzf /tmp/trufflehog.tgz trufflehog
+          trufflehog --version
+      # Current tree only. A full-history scan would also flag a now-removed
+      # dummy URL in the first 0.2.4 commit; that history is left in place.
+      - name: Scan the checkout
+        run: >
+          trufflehog filesystem "$GITHUB_WORKSPACE"
+          --no-update --no-verification --fail --results=unverified,unknown
+          --exclude-paths "$GITHUB_WORKSPACE/.github/trufflehog-exclude.txt"
