@@ -21,6 +21,11 @@ jobs:
       security-events: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          # Push and schedule: this commit. pull_request (including Dependabot):
+          # the proposed head, so a missing merge commit does not fail checkout.
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
       - uses: github/codeql-action/init@1bd86f2fdb4b86187fa4059f16f31a3202acc9ea # v4.39.4
         with:
           languages: rust
@@ -36,7 +41,9 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
-      # Pinned binary (the action's container tag v3.100.0 was not published).
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      # Pinned binary. The TruffleHog action's container tag v3.100.0 was not
+      # published (that failed the first Security run and Dependabot PRs).
       # --no-verification keeps candidate secrets on the runner.
       - name: Install TruffleHog v3.100.0
         run: |
@@ -45,10 +52,13 @@ jobs:
           echo "b2d85eba59865e98f45c9fc9f77d2c6d62df529fdd5755af121304ea5a7cecbb  /tmp/trufflehog.tgz" | sha256sum -c
           sudo tar -C /usr/local/bin -xzf /tmp/trufflehog.tgz trufflehog
           trufflehog --version
-      # Current tree only. A full-history scan would also flag a now-removed
-      # dummy URL in the first 0.2.4 commit; that history is left in place.
+      # Scan the checked-out tree, not git history: a dummy URL in commit
+      # 5a018f5 would otherwise fail a history scan. Excludes are written here
+      # so the job does not depend on a file from the branch.
       - name: Scan the checkout
-        run: >
-          trufflehog filesystem "$GITHUB_WORKSPACE"
-          --no-update --no-verification --fail --results=unverified,unknown
-          --exclude-paths "$GITHUB_WORKSPACE/.github/trufflehog-exclude.txt"
+        run: |
+          set -euo pipefail
+          printf '%s\n' '\.git/' '(^|/)target/' > "$RUNNER_TEMP/trufflehog-exclude.txt"
+          trufflehog filesystem "$GITHUB_WORKSPACE" \
+            --no-update --no-verification --fail --results=unverified,unknown \
+            --exclude-paths "$RUNNER_TEMP/trufflehog-exclude.txt"
