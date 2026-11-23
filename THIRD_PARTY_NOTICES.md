@@ -24,6 +24,7 @@ The model weights are unmodified. Apache-2.0 permits redistribution with the lic
 | resvg, usvg, tiny-skia | SVG icon rendering | Apache-2.0 OR MIT / BSD-3-Clause |
 | serde, serde_json | Settings and history files | MIT OR Apache-2.0 |
 | libloading | Optional SDK loading | ISC |
+| sha2 | SHA-256 check of the official AI model file | MIT OR Apache-2.0 |
 
 ## Data sources
 

@@ -5,3 +5,9 @@ updates:
     directory: /
     schedule:
       interval: monthly
+  # Library crates in Cargo.lock (security and compatible updates).
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: monthly
+    open-pull-requests-limit: 5

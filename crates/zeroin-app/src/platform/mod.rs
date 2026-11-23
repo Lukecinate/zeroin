@@ -107,10 +107,78 @@ pub struct DeviceIdentity {
     pub mock: bool,
 }
 
+fn is_ipv4_literal(host: &str) -> bool {
+    let mut n = 0;
+    for part in host.split('.') {
+        if part.is_empty() || part.parse::<u8>().is_err() {
+            return false;
+        }
+        n += 1;
+    }
+    n == 4
+}
+
+fn url_char_forbidden(c: char) -> bool {
+    c.is_control() || " \"\\<>'`{}@".contains(c)
+}
+
+/// True when `url` is a plain `https://` address safe to hand to the
+/// system browser: no credentials, no whitespace, no control characters,
+/// and a dotted host made of letters, digits, dots and hyphens.
+pub fn is_safe_https_url(url: &str) -> bool {
+    let Some(rest) = url.strip_prefix("https://") else { return false };
+    if rest.is_empty() || url.chars().any(url_char_forbidden) {
+        return false;
+    }
+    let host = rest.split(['/', '?', '#']).next().unwrap_or("");
+    !host.is_empty()
+        && host.contains('.')
+        && !host.starts_with('.')
+        && !host.ends_with('.')
+        && !host.contains("..")
+        && host.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-')
+        && !is_ipv4_literal(host)
+}
+
 /// Open an HTTPS page in the default browser. Other schemes are refused.
 pub fn open_https(url: &str) -> bool {
-    if !url.starts_with("https://") || url.chars().any(|c| c.is_control() || c == '"' || c == ' ') {
+    if !is_safe_https_url(url) {
         return false;
     }
     open_url_impl(url)
+}
+
+#[cfg(test)]
+mod url_tests {
+    use super::is_safe_https_url;
+
+    #[test]
+    fn accepts_known_project_urls() {
+        assert!(is_safe_https_url("https://github.com/Lukecinate/zeroin"));
+        assert!(is_safe_https_url("https://www.eloshapes.com/mouse/browse"));
+        assert!(is_safe_https_url("https://duckduckgo.com/?q=Zero+Mid+mousepad+specs"));
+    }
+
+    #[test]
+    fn rejects_schemes_credentials_and_junk() {
+        let bad = [
+            "http://example.com/",
+            "HTTPS://example.com/",
+            "https://example.com/ path",
+            "https://user:pass@example.com/",
+            r"https://example.com/\windows",
+            "https://example.com/<script>",
+            "https://.example.com/",
+            "https://example.com./",
+            "https://localhost/admin",
+            "https://127.0.0.1/",
+            "https://example.com\"oops",
+            "javascript:alert(1)",
+            "https://exam ple.com/",
+            "https://example..com/",
+        ];
+        for u in bad {
+            assert!(!is_safe_https_url(u), "{u}");
+        }
+    }
 }

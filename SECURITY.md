@@ -13,5 +13,6 @@ You can expect an initial reply within 7 days. Please include the version, Windo
 ## Scope notes
 
 - ZeroIn makes no network requests. Releases are built by GitHub Actions and published with SHA-256 checksums.
-- The bundled model is downloaded in CI from a pinned revision and verified against a fixed SHA-256 before packaging.
+- The bundled model is downloaded in CI from a pinned revision and verified against a fixed SHA-256 before packaging. At run time the app loads a `.gguf` file only when it is a regular file of the expected size and its SHA-256 matches that same digest.
+- History, settings and journal files are read only if they are regular files no larger than 8 MiB; symbolic links are not followed.
 - Optional third-party libraries (the Wooting Analog SDK) are loaded only if the user installed them; ZeroIn does not ship them.

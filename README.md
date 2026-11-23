@@ -47,7 +47,7 @@ Test, Result and Settings were captured from version 0.2.0, Setup and History fr
 
 Download `ZeroIn-Setup-<version>-x64.exe` from [Releases](https://github.com/Lukecinate/zeroin/releases) and run it. The installer includes the AI model (about 1.1 GB) and installs per user by default (no admin rights needed).
 
-A portable zip without the model is also published. To add the model to the portable build, place a `.gguf` file in a `models` folder next to `zeroin.exe`, or in `%APPDATA%\ZeroIn\models`.
+A portable zip without the model is also published. To add the model to the portable build, place the official `Qwen3-1.7B-Q4_K_M.gguf` file (the same file the installer ships; SHA-256 `b139949c5bd74937ad8ed8c8cf3d9ffb1e99c866c823204dc42c0d91fa181897`) in a `models` folder next to `zeroin.exe`, or in `%APPDATA%\ZeroIn\models`. Any other `.gguf` file is ignored.
 
 Verify downloads with `SHA256SUMS.txt` from the same release:
 

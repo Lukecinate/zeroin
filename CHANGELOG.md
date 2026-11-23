@@ -4,6 +4,20 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [0.2.4] - 2026-11-23
+
+Security patch: tighter checks on local files and the optional AI model, a CodeQL and secret-scan workflow, and chaos tests around JSON loading. Layout and test results are unchanged from 0.2.3.
+
+### Security
+- **Official AI model only.** A `.gguf` file is loaded only if it is a regular file (not a symbolic link), is between 500 MiB and 2 GiB, and its SHA-256 matches the official Qwen3 1.7B Q4_K_M digest already used in the release workflow. A planted or substituted model is refused before llama.cpp opens it. The portable zip still works without a model; to add the advisor, use the same official file as the installer.
+- **JSON files are size-capped and not followed through links.** History, settings and journals larger than 8 MiB, or that are symbolic links, are left untouched and not loaded.
+- **Browser links stay on plain HTTPS hosts.** Pages opened in the default browser must use `https://` with a dotted host and no credentials, whitespace or control characters.
+- **Raw Input records are only used when complete.** A short `GetRawInputData` read is ignored, and the buffer is cleared before each read so a previous report cannot be reused.
+
+### Development
+- Chaos tests for oversized files, symbolic links, deeply nested and invalid UTF-8 JSON, concurrent saves, URL rejection, model hash vectors and short Raw Input reads.
+- `security.yml`: CodeQL for Rust and a TruffleHog secret scan, both pinned to commit SHAs. Dependabot now also watches the Cargo lockfile.
+
 ## [0.2.3] - 2026-11-13
 
 Reliability and safety fixes from a concurrency and lifetime audit. Layout and test behaviour are unchanged.

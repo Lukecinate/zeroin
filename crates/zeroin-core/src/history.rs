@@ -293,9 +293,31 @@ impl SavedTest {
     }
 }
 
-/// Load JSON from `path`. A missing file yields `T::default()`.
+/// Largest history, settings or journal file that will be read or written.
+/// Eight mebibytes is far above a normal file and stops a huge planted file
+/// from being loaded into memory.
+pub const MAX_JSON_BYTES: u64 = 8 * 1024 * 1024;
+
+/// Read `path` for JSON load: a regular file no larger than [`MAX_JSON_BYTES`].
+/// Symbolic links are refused so a redirected path is never followed.
+fn read_json_bytes(path: &Path) -> io::Result<Vec<u8>> {
+    let meta = std::fs::symlink_metadata(path)?;
+    if meta.file_type().is_symlink() {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "refusing to read a symbolic link"));
+    }
+    if !meta.is_file() {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "path is not a regular file"));
+    }
+    if meta.len() > MAX_JSON_BYTES {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, format!("file is larger than {MAX_JSON_BYTES} bytes")));
+    }
+    std::fs::read(path)
+}
+
+/// Load JSON from `path`. A missing file yields `T::default()`. Symbolic
+/// links and files larger than [`MAX_JSON_BYTES`] are errors.
 pub fn load_json<T: DeserializeOwned + Default>(path: &Path) -> io::Result<T> {
-    match std::fs::read(path) {
+    match read_json_bytes(path) {
         Ok(bytes) => serde_json::from_slice(&bytes).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e)),
         Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(T::default()),
         Err(e) => Err(e),
@@ -316,6 +338,9 @@ pub fn save_json<T: Serialize>(path: &Path, value: &T) -> io::Result<()> {
         }
     }
     let bytes = serde_json::to_vec_pretty(value).map_err(io::Error::other)?;
+    if bytes.len() as u64 > MAX_JSON_BYTES {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, format!("JSON is larger than {MAX_JSON_BYTES} bytes")));
+    }
     let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "data.json".into());
     let tmp = path.with_file_name(format!("{name}.{}-{}.tmp", std::process::id(), SEQ.fetch_add(1, Ordering::Relaxed)));
     let res = (|| {
@@ -365,7 +390,7 @@ impl<T> std::fmt::Debug for Guarded<T> {
 /// Load `path`; corrupt files are set aside under a unique name such as
 /// `history.json.unreadable-1763020800`, other errors leave the file alone.
 pub fn load_json_guarded<T: DeserializeOwned + Default>(path: &Path, now_unix: u64) -> Guarded<T> {
-    let bytes = match std::fs::read(path) {
+    let bytes = match read_json_bytes(path) {
         Ok(b) => b,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Guarded::Loaded(T::default()),
         Err(e) => return Guarded::Unavailable { error: e.to_string() },
@@ -651,5 +676,89 @@ mod tests {
         assert_eq!(s.rounds, 3);
         assert!(s.ai_enabled);
         assert_eq!(s.mode, Mode::Balanced);
+    }
+    #[test]
+    fn oversized_file_is_not_loaded_or_set_aside() {
+        let d = tmpdir();
+        let p = d.join("history.json");
+        let huge = vec![b'x'; (MAX_JSON_BYTES as usize) + 1];
+        std::fs::write(&p, &huge).unwrap();
+        assert!(load_json::<History>(&p).is_err());
+        match load_json_guarded::<History>(&p, 1) {
+            Guarded::Unavailable { error } => assert!(error.contains("larger"), "{error}"),
+            other => panic!("expected Unavailable, got {other:?}"),
+        }
+        // Original is left in place so a mistake does not delete a large file.
+        assert_eq!(std::fs::metadata(&p).unwrap().len(), huge.len() as u64);
+    }
+
+    #[test]
+    fn symbolic_link_is_not_followed() {
+        let d = tmpdir();
+        let real = d.join("real.json");
+        let link = d.join("history.json");
+        std::fs::write(&real, b"{\"sessions\": []}").unwrap();
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(&real, &link).unwrap();
+            assert!(load_json::<History>(&link).is_err());
+            assert!(matches!(load_json_guarded::<History>(&link, 1), Guarded::Unavailable { .. }));
+            assert!(real.exists(), "the symlink target must be left untouched");
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = (real, link);
+        }
+    }
+
+    #[test]
+    fn deeply_nested_json_is_rejected_and_set_aside() {
+        let d = tmpdir();
+        let p = d.join("history.json");
+        // serde_json's default recursion limit is 128; this is well past it.
+        let nest = "[".repeat(200) + &"]".repeat(200);
+        std::fs::write(&p, nest.as_bytes()).unwrap();
+        match load_json_guarded::<History>(&p, 42) {
+            Guarded::SetAside { moved_to, .. } => {
+                assert!(!p.exists());
+                assert!(moved_to.ends_with("history.json.unreadable-42"));
+            }
+            other => panic!("expected SetAside, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn invalid_utf8_is_set_aside() {
+        let d = tmpdir();
+        let p = d.join("settings.json");
+        std::fs::write(&p, [0xff, 0xfe, 0x00, b'{']).unwrap();
+        assert!(matches!(load_json_guarded::<Settings>(&p, 7), Guarded::SetAside { .. }));
+    }
+
+    #[test]
+    fn concurrent_saves_do_not_share_a_temp_file_and_leave_valid_json() {
+        let d = tmpdir();
+        let p = d.join("settings.json");
+        let path = p.clone();
+        std::thread::scope(|scope| {
+            for i in 0..8u32 {
+                let path = path.clone();
+                scope.spawn(move || {
+                    for k in 0..20u32 {
+                        let s = Settings { rounds: i * 20 + k, ..Settings::default() };
+                        save_json(&path, &s).unwrap();
+                    }
+                });
+            }
+        });
+        let back: Settings = load_json(&p).unwrap();
+        let _ = back;
+        let leftovers: Vec<_> = std::fs::read_dir(&d)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name())
+            .filter(|n| n.to_string_lossy().contains(".tmp"))
+            .collect();
+        assert!(leftovers.is_empty(), "temp files left behind: {leftovers:?}");
     }
 }

@@ -29,6 +29,11 @@ pub struct RawInput {
     rx: Option<EventReceiver>,
 }
 
+/// True when `GetRawInputData` returned a complete `RAWINPUT` record.
+fn raw_input_complete(got: u32, min_bytes: usize) -> bool {
+    got != u32::MAX && (got as usize) >= min_bytes
+}
+
 unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
 }
@@ -104,9 +109,14 @@ impl RawInput {
                         if need > buf.len() {
                             buf.resize(need, 0);
                         }
+                        buf[..need].fill(0);
                         let got = GetRawInputData(handle, RID_INPUT, Some(buf.as_mut_ptr() as *mut _), &mut size, hdr);
-                        if got != u32::MAX && got as usize >= std::mem::size_of::<RAWINPUTHEADER>() {
-                            // SAFETY: the buffer holds at least size_of::<RAWINPUT>() initialised bytes.
+                        // Need the full RAWINPUT (header plus the mouse/keyboard
+                        // union), not just the header; a short read would copy
+                        // padding or a previous report.
+                        if raw_input_complete(got, raw_size) {
+                            // SAFETY: got >= size_of::<RAWINPUT>() bytes were written
+                            // into the aligned buffer by GetRawInputData.
                             let raw: RAWINPUT = std::ptr::read_unaligned(buf.as_ptr() as *const RAWINPUT);
                             let device = raw.header.hDevice.0 as usize as u64;
                             if raw.header.dwType == RIM_TYPEMOUSE.0 {
@@ -452,5 +462,20 @@ pub fn claim_single_instance() -> bool {
             let _ = SetForegroundWindow(hwnd);
         }
         false
+    }
+}
+
+#[cfg(test)]
+mod raw_input_tests {
+    use super::raw_input_complete;
+
+    #[test]
+    fn short_or_failed_reads_are_rejected() {
+        let need = 48;
+        assert!(!raw_input_complete(u32::MAX, need));
+        assert!(!raw_input_complete(0, need));
+        assert!(!raw_input_complete(16, need), "header-only is not enough");
+        assert!(raw_input_complete(need as u32, need));
+        assert!(raw_input_complete((need + 8) as u32, need));
     }
 }

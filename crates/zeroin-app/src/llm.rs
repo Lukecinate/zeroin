@@ -315,6 +315,14 @@ fn worker(args: WorkerArgs) {
         }
     };
     backend.void_logs();
+    if let Err(e) = crate::paths::verify_official_model(&path) {
+        set(LlmStatus::Failed(e));
+        ctx.request_repaint();
+        return;
+    }
+    if cancel.load(Ordering::SeqCst) {
+        return;
+    }
     let params = LlamaModelParams::default().with_n_gpu_layers(0);
     let model = match LlamaModel::load_from_file(&backend, &path, &params) {
         Ok(m) => m,
